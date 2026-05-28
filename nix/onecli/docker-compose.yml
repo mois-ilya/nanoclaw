@@ -1,50 +1,51 @@
 name: onecli
 
+# NixOS-tweaked variant of the upstream onecli compose:
+# - both services run on the host network namespace (network_mode: host),
+#   which sidesteps the netavark/aardvark-dns wiring NixOS does not set up
+#   by default for custom bridge networks.
+# - postgres listens on 127.0.0.1:5432, onecli ports are 10254/10255 on
+#   the host directly — same surface as the upstream stack.
+# - DATABASE_URL points at 127.0.0.1 since both containers share the host's
+#   loopback now.
+
 services:
   postgres:
     image: docker.io/library/postgres:18-alpine
     restart: unless-stopped
+    network_mode: host
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-onecli}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onecli}
       POSTGRES_DB: ${POSTGRES_DB:-onecli}
+      PGPORT: ${POSTGRES_PORT:-5432}
     volumes:
       - pgdata:/var/lib/postgresql
-    ports:
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onecli}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onecli} -h 127.0.0.1 -p ${POSTGRES_PORT:-5432}"]
       interval: 5s
       timeout: 3s
       start_period: 15s
       retries: 10
-    networks:
-      - onecli
 
   onecli:
     image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-latest}
     container_name: onecli
     restart: unless-stopped
+    network_mode: host
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
       APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
       GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
+      PORT: ${ONECLI_APP_PORT:-10254}
+      GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
     volumes:
       - app-data:/app/data
-    networks:
-      - onecli
 
 volumes:
   pgdata:
   app-data:
-
-networks:
-  onecli:
-    driver: bridge
