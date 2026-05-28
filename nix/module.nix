@@ -185,6 +185,16 @@ in
         Group = cfg.group;
         Slice = "nanoclaw.slice";
         WorkingDirectory = cfg.dataDir;
+        # Materialize a .env file in the working dir from the sops-managed
+        # KEY=VALUE secret files. The host (src/env.ts) reads .env from cwd
+        # rather than process env so credentials don't leak to child
+        # processes (agent containers). Non-secret config goes via
+        # EnvironmentFile=/etc/nanoclaw/env as normal systemd env.
+        ExecStartPre = pkgs.writeShellScript "nanoclaw-prepare-env" ''
+          set -e
+          umask 077
+          cat ${cfg.secrets.telegramBotTokenFile} ${cfg.secrets.claudeOauthTokenFile} > ${cfg.dataDir}/.env
+        '';
         ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.package}/libexec/nanoclaw/dist/index.js";
         Restart = "always";
         RestartSec = 10;
@@ -194,11 +204,7 @@ in
         NoNewPrivileges = true;
         SupplementaryGroups = cfg.extraGroups;
 
-        EnvironmentFile = [
-          "/etc/nanoclaw/env"
-          cfg.secrets.telegramBotTokenFile
-          cfg.secrets.claudeOauthTokenFile
-        ];
+        EnvironmentFile = [ "/etc/nanoclaw/env" ];
       };
     };
   };
