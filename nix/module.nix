@@ -227,6 +227,12 @@ in
             cat ${cfg.secrets.telegramBotTokenFile}; echo
             cat ${cfg.secrets.claudeOauthTokenFile}; echo
           } > ${cfg.dataDir}/.env
+
+          # container-runner.ts resolves shared mounts (agent-runner src,
+          # skills, CLAUDE.md) via process.cwd() + "container/". The host
+          # runs with WorkingDirectory=cfg.dataDir for .env-from-cwd
+          # purposes, so symlink the packaged container tree into cwd.
+          ln -sfn ${cfg.package}/libexec/nanoclaw/container ${cfg.dataDir}/container
         '';
         ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.package}/libexec/nanoclaw/dist/index.js";
         Restart = "always";
