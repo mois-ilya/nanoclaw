@@ -69,6 +69,19 @@ in
       description = "Container runtime backend.";
     };
 
+    webhookPort = lib.mkOption {
+      type = lib.types.port;
+      default = 3000;
+      description = ''
+        Port for the shared webhook HTTP server used by Chat SDK adapters.
+        Even adapters running in polling mode (e.g. Telegram with
+        mode='polling') currently get registered on this server by the
+        bridge — so the port must be free even if no inbound webhook
+        traffic is expected. Override when 3000 is taken by another
+        service on the host.
+      '';
+    };
+
     secrets = {
       telegramBotTokenFile = lib.mkOption {
         type = lib.types.path;
@@ -142,6 +155,7 @@ in
       CONTAINER_IMAGE=${cfg.containerImage}
       MAX_CONCURRENT_CONTAINERS=${toString cfg.maxConcurrentContainers}
       CONTAINER_RUNTIME=${cfg.containerRuntime}
+      WEBHOOK_PORT=${toString cfg.webhookPort}
       TZ=UTC
     '';
 
