@@ -38,4 +38,7 @@ groups/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
+# Per-install migration runbook (operator-specific notes from /migrate-nanoclaw)
+.nanoclaw-migrations/
+
 agents-sdk-docs
