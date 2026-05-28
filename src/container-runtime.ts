@@ -3,6 +3,7 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
@@ -15,7 +16,14 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly
   if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
+    const args = ['--add-host=host.docker.internal:host-gateway'];
+    // NixOS firewall blocks traffic from the podman bridge to host loopback
+    // services (OneCLI gateway, credential proxy). Share the host network
+    // namespace so 127.0.0.1 inside the container is the host's loopback.
+    if (fs.existsSync('/etc/NIXOS')) {
+      args.push('--network=host');
+    }
+    return args;
   }
   return [];
 }
