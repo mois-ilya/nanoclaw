@@ -193,7 +193,10 @@ in
         ExecStartPre = pkgs.writeShellScript "nanoclaw-prepare-env" ''
           set -e
           umask 077
-          cat ${cfg.secrets.telegramBotTokenFile} ${cfg.secrets.claudeOauthTokenFile} > ${cfg.dataDir}/.env
+          {
+            cat ${cfg.secrets.telegramBotTokenFile}; echo
+            cat ${cfg.secrets.claudeOauthTokenFile}; echo
+          } > ${cfg.dataDir}/.env
         '';
         ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.package}/libexec/nanoclaw/dist/index.js";
         Restart = "always";
