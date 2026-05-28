@@ -15,7 +15,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-telegram/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/telegram@4.26.0"
+ADAPTER_VERSION="@chat-adapter/telegram@4.27.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -51,7 +51,9 @@ fi
 
 need_install() {
   [ ! -f src/channels/telegram.ts ] && return 0
+  [ ! -f src/channels/telegram-bot-commands.ts ] && return 0
   ! grep -q "^import './telegram.js';" src/channels/index.ts 2>/dev/null && return 0
+  ! grep -q '^export const ADMIN_COMMANDS' src/command-gate.ts 2>/dev/null && return 0
   return 1
 }
 
@@ -64,11 +66,12 @@ if need_install; then
     exit 1
   }
 
-  # pair-telegram.ts is maintained in this branch (setup-auto), so it's NOT
-  # in this list — do not overwrite the local version with the channels copy.
-  log "Copying adapter files from ${CHANNELS_BRANCH}…"
+  # Base files from channels branch (unchanged by the /add-telegram skill).
+  # telegram.ts is NOT in this list — it's overridden by the skill's
+  # patched version below. pair-telegram.ts is maintained in this branch
+  # (setup-auto), so it's also not copied from channels.
+  log "Copying adapter base files from ${CHANNELS_BRANCH}…"
   for f in \
-    src/channels/telegram.ts \
     src/channels/telegram-pairing.ts \
     src/channels/telegram-pairing.test.ts \
     src/channels/telegram-markdown-sanitize.ts \
@@ -76,6 +79,37 @@ if need_install; then
   do
     git show "${CHANNELS_BRANCH}:$f" > "$f"
   done
+
+  # Skill-owned files (HTML rendering, setMyCommands, supportsThreads,
+  # getMe identity). Single source of truth: .claude/skills/add-telegram/files/.
+  log "Copying skill-owned files from .claude/skills/add-telegram/files/…"
+  for f in \
+    telegram.ts \
+    telegram-bot-commands.ts \
+    telegram-bot-commands.test.ts
+  do
+    src=".claude/skills/add-telegram/files/$f"
+    if [ ! -f "$src" ]; then
+      emit_status failed "missing skill file ${src} — is .claude/skills/add-telegram intact?"
+      exit 1
+    fi
+    cp "$src" "src/channels/$f"
+  done
+
+  # Container-side skill — formatting + reply_to_seq rules. Mounted into
+  # every agent container at runtime, generic for any Telegram install.
+  log "Installing container/skills/telegram from skill source…"
+  mkdir -p container/skills/telegram
+  cp .claude/skills/add-telegram/files/container-skill.md container/skills/telegram/SKILL.md
+
+  # Patch command-gate.ts: export ADMIN_COMMANDS (the drift test imports it).
+  if ! grep -q '^export const ADMIN_COMMANDS' src/command-gate.ts; then
+    awk '
+      /^const ADMIN_COMMANDS = / { print "export " $0; next }
+      { print }
+    ' src/command-gate.ts > src/command-gate.ts.tmp \
+      && mv src/command-gate.ts.tmp src/command-gate.ts
+  fi
 
   # Append self-registration import if missing.
   if ! grep -q "^import './telegram.js';" src/channels/index.ts; then

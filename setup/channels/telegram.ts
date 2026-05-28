@@ -45,7 +45,7 @@ export async function runTelegramChannel(displayName: string): Promise<ChannelFl
   const tokenOrBack = await collectTelegramToken();
   if (tokenOrBack === 'back') return BACK_TO_CHANNEL_SELECTION;
   const token = tokenOrBack;
-  const botUsername = await validateTelegramToken(token);
+  const { username: botUsername, firstName: botFirstName } = await validateTelegramToken(token);
 
   // Deep-link the user into the bot's chat so they're on the right screen
   // by the time pair-telegram prints the code. https://t.me/<bot> works
@@ -128,7 +128,7 @@ export async function runTelegramChannel(displayName: string): Promise<ChannelFl
   const role = await askOperatorRole('Telegram');
   setupLog.userInput('telegram_role', role);
 
-  const agentName = await resolveAgentName();
+  const agentName = await resolveAgentName(botFirstName);
 
   const init = await runQuietChild(
     'init-first-agent',
@@ -228,7 +228,7 @@ async function collectTelegramToken(): Promise<string | 'back'> {
   return token;
 }
 
-async function validateTelegramToken(token: string): Promise<string> {
+async function validateTelegramToken(token: string): Promise<{ username: string; firstName: string }> {
   const s = p.spinner();
   const start = Date.now();
   s.start('Checking your bot token…');
@@ -236,17 +236,19 @@ async function validateTelegramToken(token: string): Promise<string> {
     const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
     const data = (await res.json()) as {
       ok?: boolean;
-      result?: { username?: string; id?: number };
+      result?: { username?: string; first_name?: string; id?: number };
       description?: string;
     };
     if (data.ok && data.result?.username) {
       const username = data.result.username;
+      const firstName = data.result.first_name ?? '';
       s.stop(`Found your bot: @${username}. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`);
       setupLog.step('telegram-validate', 'success', Date.now() - start, {
         BOT_USERNAME: username,
+        BOT_FIRST_NAME: firstName,
         BOT_ID: data.result.id ?? '',
       });
-      return username;
+      return { username, firstName };
     }
     const reason = data.description ?? 'token rejected by Telegram';
     s.stop(`Telegram didn't accept that token: ${reason}`, 1);
@@ -342,20 +344,24 @@ function formatCodeCard(code: string): string {
   ].join('\n');
 }
 
-async function resolveAgentName(): Promise<string> {
+async function resolveAgentName(botFirstName: string): Promise<string> {
   const preset = process.env.NANOCLAW_AGENT_NAME?.trim();
   if (preset) {
     setupLog.userInput('agent_name', preset);
     return preset;
   }
+  // Default to the bot's BotFather-configured first_name when present —
+  // mirrors the Telegram chat header users see — and fall back to the
+  // legacy "Nano" only if the API didn't return one.
+  const defaultName = botFirstName.trim() || DEFAULT_AGENT_NAME;
   const answer = ensureAnswer(
     await p.text({
       message: `What should your ${accentGreen('assistant')} be called?`,
-      placeholder: DEFAULT_AGENT_NAME,
-      defaultValue: DEFAULT_AGENT_NAME,
+      placeholder: defaultName,
+      defaultValue: defaultName,
     }),
   );
-  const value = (answer as string).trim() || DEFAULT_AGENT_NAME;
+  const value = (answer as string).trim() || defaultName;
   setupLog.userInput('agent_name', value);
   return value;
 }

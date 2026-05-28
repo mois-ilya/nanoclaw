@@ -29,7 +29,21 @@ Then ask in plain text (NOT `AskUserQuestion` — these are free-form):
 
 1. **Your user id on this channel** — e.g. a Discord user ID, Telegram user ID, Slack user ID. Record as `USER_HANDLE`.
 2. **Your display name** — human name, used to name the agent group (`dm-with-<normalized>`) and as the welcome-message addressee. Record as `DISPLAY_NAME`.
-3. **Agent persona name** — the assistant's display name. Default: `DISPLAY_NAME`. Record as `AGENT_NAME`.
+3. **Agent persona name** — the assistant's display name. Record as `AGENT_NAME`.
+
+   **Default-resolution rule:**
+
+   - If `CHANNEL == telegram`, fetch the bot's BotFather-configured display name via `getMe` and use that as the proposed default. This avoids inventing a name when the bot already has one on the platform:
+
+     ```bash
+     TG_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' .env | sed 's/^TELEGRAM_BOT_TOKEN=//')
+     TG_FIRST_NAME=$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getMe" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['first_name'])" 2>/dev/null)
+     ```
+
+     If `TG_FIRST_NAME` is empty (token missing or API unreachable), fall back to `DISPLAY_NAME`.
+   - For all other channels, default is `DISPLAY_NAME`.
+
+   Offer the resolved default to the user — they can accept or type their own.
 
 ## 3. Resolve the DM platform id
 

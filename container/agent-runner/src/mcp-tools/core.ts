@@ -104,6 +104,16 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
         },
         text: { type: 'string', description: 'Message content' },
+        reply_to_seq: {
+          type: 'number',
+          description:
+            'Optional. Seq of a past message to reply to (the `id` attribute on `<message id="N">` blocks). Currently used by the Telegram adapter to set reply_parameters; other channels ignore it. Use only when the reference is non-obvious to the reader — see your channel skill for guidance. If the seq does not resolve to a deliverable platform id the host silently sends without the reply tag.',
+        },
+        quote_text: {
+          type: 'string',
+          description:
+            'Optional. Telegram-only. A substring of the replied-to message to highlight as a quote. Requires reply_to_seq. Must match the target message text exactly (no HTML/markdown formatting — plain text only). Telegram validates server-side; if the substring is not found, the adapter retries without the quote so the reply still goes out. Use when you want to anchor your reply to a specific fragment of a long message; omit for a normal full-message reply.',
+        },
       },
       required: ['text'],
     },
@@ -115,6 +125,24 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    const content: Record<string, unknown> = { text };
+
+    // Optional reply targeting. Resolve the agent-visible seq to the
+    // message's platform id (e.g., "<chatId>:<msgId>:<group>" for Telegram
+    // inbound). The adapter parses what it needs and applies reply mechanics
+    // if it supports them.
+    if (typeof args.reply_to_seq === 'number') {
+      const targetId = getMessageIdBySeq(args.reply_to_seq);
+      if (targetId) {
+        content.reply_to_message_id = targetId;
+        if (typeof args.quote_text === 'string' && args.quote_text.length > 0) {
+          content.reply_quote_text = args.quote_text;
+        }
+      } else {
+        log(`send_message: reply_to_seq=${args.reply_to_seq} did not resolve; sending without reply`);
+      }
+    }
+
     const id = generateId();
     const seq = writeMessageOut({
       id,
@@ -123,7 +151,7 @@ export const sendMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
+      content: JSON.stringify(content),
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
