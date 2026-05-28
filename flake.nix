@@ -25,6 +25,7 @@
 
       nixosModules = rec {
         nanoclaw = ./nix/module.nix;
+        onecli = ./nix/onecli/module.nix;
         default = nanoclaw;
       };
     };

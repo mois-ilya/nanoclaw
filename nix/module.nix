@@ -82,6 +82,17 @@ in
       '';
     };
 
+    oneCliUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://127.0.0.1:10254";
+      description = ''
+        Base URL of the OneCLI gateway used by the host SDK and (via
+        --network=host on NixOS) by per-agent containers. v2 will not
+        spawn a container without a reachable OneCLI — leave default if
+        you are running services.onecli on the same host.
+      '';
+    };
+
     secrets = {
       telegramBotTokenFile = lib.mkOption {
         type = lib.types.path;
@@ -156,6 +167,7 @@ in
       MAX_CONCURRENT_CONTAINERS=${toString cfg.maxConcurrentContainers}
       CONTAINER_RUNTIME=${cfg.containerRuntime}
       WEBHOOK_PORT=${toString cfg.webhookPort}
+      ONECLI_URL=${cfg.oneCliUrl}
       TZ=UTC
     '';
 
@@ -174,8 +186,12 @@ in
       after = [
         "network-online.target"
         "${cfg.containerRuntime}.service"
+        "onecli.service"
       ];
-      wants = [ "network-online.target" ];
+      wants = [
+        "network-online.target"
+        "onecli.service"
+      ];
 
       path = [
         pkgs.${cfg.containerRuntime}
