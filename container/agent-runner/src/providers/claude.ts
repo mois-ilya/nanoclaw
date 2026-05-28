@@ -395,6 +395,11 @@ export class ClaudeProvider implements AgentProvider {
     stream.push(input.prompt);
 
     const instructions = input.systemContext?.instructions;
+    const effectiveModel = input.modelOverride ?? this.model;
+    const effectiveEffort = input.effortOverride ?? this.effort;
+    if (input.modelOverride || input.effortOverride) {
+      log(`Per-query override: model=${effectiveModel ?? '(default)'} effort=${effectiveEffort ?? '(default)'}`);
+    }
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -410,9 +415,9 @@ export class ClaudeProvider implements AgentProvider {
         ],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
-        model: this.model,
+        model: effectiveModel,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.effort as any,
+        effort: effectiveEffort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user', 'local'],

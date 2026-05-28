@@ -14,6 +14,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import { detectTier } from './tier-router.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -202,6 +203,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
 
+    // Adaptive tier — inspect user-typed text for escalation/de-escalation
+    // triggers (e.g. "подумай" → Sonnet+high, "опус" → Opus+high). Tier
+    // applies to this single SDK call; the next inbound starts fresh.
+    const tier = detectTier(keep);
+    if (tier.name !== 'default') {
+      log(`Tier "${tier.name}" matched — model=${tier.model ?? '(default)'} effort=${tier.effort ?? '(default)'}`);
+    }
+
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
     const query = config.provider.query({
@@ -209,6 +218,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
+      modelOverride: tier.model,
+      effortOverride: tier.effort,
     });
 
     // Process the query while concurrently polling for new messages

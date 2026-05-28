@@ -72,6 +72,15 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Per-query overrides for model and reasoning effort. When set, replace
+   * the values bound at provider construction for THIS call only. Used by
+   * the agent-runner's adaptive-tier router to route an individual message
+   * to a heavier model/effort based on user-typed triggers.
+   */
+  modelOverride?: string;
+  effortOverride?: string;
 }
 
 export interface McpServerConfig {
