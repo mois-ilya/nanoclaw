@@ -6,7 +6,14 @@ import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from 
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'ONECLI_URL',
+  'ONECLI_API_KEY',
+  'ONECLI_NO_PROXY',
+  'TZ',
+]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -35,6 +42,15 @@ export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
+// Hosts the agent container should reach DIRECTLY, bypassing the OneCLI MITM
+// proxy (injected as NO_PROXY/no_proxy at spawn time). OneCLI itself sets no
+// NO_PROXY, so this value is uncontested. Tailscale's control plane pins/validates
+// its own TLS and must not be intercepted; comma-separated, leading-dot = subdomains.
+// Override via .env `ONECLI_NO_PROXY=...` (replaces the default list).
+export const ONECLI_NO_PROXY =
+  process.env.ONECLI_NO_PROXY ||
+  envConfig.ONECLI_NO_PROXY ||
+  'controlplane.tailscale.com,login.tailscale.com,.tailscale.io';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);

@@ -16,6 +16,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
+  ONECLI_NO_PROXY,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
@@ -410,6 +411,16 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // OneCLI proxy bypass. OneCLI's applyContainerConfig (below) injects
+  // HTTPS_PROXY + NODE_USE_ENV_PROXY=1 but never sets NO_PROXY, so these
+  // are uncontested. Hosts listed here are reached directly instead of via
+  // the MITM gateway — required for endpoints with pinned/own-CA TLS such as
+  // the Tailscale control plane. Both casings: Node honors NO_PROXY, curl no_proxy.
+  if (ONECLI_NO_PROXY) {
+    args.push('-e', `NO_PROXY=${ONECLI_NO_PROXY}`);
+    args.push('-e', `no_proxy=${ONECLI_NO_PROXY}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
