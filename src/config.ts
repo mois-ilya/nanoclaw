@@ -44,13 +44,13 @@ export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 // Hosts the agent container should reach DIRECTLY, bypassing the OneCLI MITM
 // proxy (injected as NO_PROXY/no_proxy at spawn time). OneCLI itself sets no
-// NO_PROXY, so this value is uncontested. Tailscale's control plane pins/validates
-// its own TLS and must not be intercepted; comma-separated, leading-dot = subdomains.
-// Override via .env `ONECLI_NO_PROXY=...` (replaces the default list).
+// NO_PROXY, so this value is uncontested. The ENTIRE tailscale.com domain must
+// be bypassed, not just the control plane: DERP relays (derpN.tailscale.com)
+// use an HTTP/WebSocket upgrade the MITM proxy mangles, which kills tailscaled's
+// relay path and any exit-node SOCKS5. A bare domain matches itself + subdomains
+// (Node/curl/Go httpproxy). Override via .env `ONECLI_NO_PROXY=...`.
 export const ONECLI_NO_PROXY =
-  process.env.ONECLI_NO_PROXY ||
-  envConfig.ONECLI_NO_PROXY ||
-  'controlplane.tailscale.com,login.tailscale.com,.tailscale.io';
+  process.env.ONECLI_NO_PROXY || envConfig.ONECLI_NO_PROXY || 'tailscale.com,tailscale.io';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
