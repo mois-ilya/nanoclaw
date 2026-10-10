@@ -22,10 +22,21 @@ let
 
     up="--socket=$sock up --hostname=$TS_HOSTNAME --accept-dns=false --reset"
     [ -s "$TS_AUTHKEY_FILE" ] && up="$up --authkey=file:$TS_AUTHKEY_FILE"
-    [ -n "''${TS_EXIT_NODE:-}" ] && up="$up --exit-node=$TS_EXIT_NODE --exit-node-allow-lan-access=false"
     [ -n "''${TS_ACCEPT_ROUTES:-}" ] && up="$up --accept-routes"
     # shellcheck disable=SC2086
     ${tailscale}/bin/tailscale $up
+
+    # The exit node is set after login: before the first netmap a node name cannot be resolved
+    # ("must be IP or unique node name"). Retry until the peer shows up; the connector stays up
+    # meanwhile, and nanogate's health probe reports the missing exit node to the owner.
+    if [ -n "''${TS_EXIT_NODE:-}" ]; then
+      (
+        until ${tailscale}/bin/tailscale --socket="$sock" set --exit-node="$TS_EXIT_NODE" --exit-node-allow-lan-access=false 2>/dev/null; do
+          sleep 10
+        done
+        echo "exit node set: $TS_EXIT_NODE"
+      ) &
+    fi
 
     wait "$daemon"
   '';

@@ -283,8 +283,8 @@ let
     dest=${cfg.backup.dir}/$(date -u +%Y%m%dT%H%M%SZ)-$label
     install -d -m 0700 ${cfg.backup.dir}
     # Make room first (a full disk would otherwise fail every retry), and never leave a partial snapshot behind.
-    # shellcheck disable=SC2012
-    ls -1d ${cfg.backup.dir}/*/ 2>/dev/null | sort -r | tail -n +${toString cfg.backup.keep} | xargs -r rm -rf
+    # find, not `ls dir/*/`: with no snapshots yet ls exits 2 and pipefail would abort the very first backup.
+    find ${cfg.backup.dir} -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +${toString cfg.backup.keep} | xargs -r rm -rf
     mkdir -p "$dest"
     ok=0
     trap '[ "$ok" = 1 ] || rm -rf "$dest"' EXIT
