@@ -239,6 +239,12 @@ let
   layoutScript = mkScript "nanoclaw-layout" [ pkgs.coreutils pkgs.findutils ] ''
     cd ${cfg.stateDir}
     install -d -o nanoclaw -g nanoclaw -m 0750 data store groups logs
+    # install -d leaves existing dirs alone; take back the top-level writable dirs (and the session root)
+    # if an earlier install or a manual step left them owned by someone else. Not recursive: agent
+    # containers write session files as their own uid.
+    for d in . data store groups logs data/v2-sessions; do
+      [ -d "$d" ] && [ "$(stat -c %U "$d")" != nanoclaw ] && chown nanoclaw:nanoclaw "$d"
+    done
     pkg=${hostPackageDir}
 
     ${if cfg.layout == "symlink" then ''
