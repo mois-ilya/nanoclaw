@@ -600,8 +600,8 @@ in
         description = "A pinned model name from this flake, or a path to any ggml model file.";
       };
       port = mkOption { type = types.port; default = 8091; };
-      threads = mkOption { type = types.ints.positive; default = 2; };
-      memoryMax = mkOption { type = types.str; default = "1G"; };
+      threads = mkOption { type = types.ints.positive; default = 3; };
+      memoryMax = mkOption { type = types.str; default = "1536M"; description = "whisper small + ffmpeg conversion needs ~0.9-1 GB; at 1G it thrashes against the cap (a 6 s clip took >60 s)."; };
     };
 
     tailscale.owner = {
