@@ -346,14 +346,20 @@ describe('resetStuckProcessingRows — giving up', () => {
     const { inDb, outDb } = makeSessionDbs();
     const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     inDb
-      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-9', 9, 'chat', ?, 'pending', 5, '{}')")
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-9', 9, 'chat', ?, 'pending', 5, '{}')",
+      )
       .run(claimedAt);
     outDb.prepare("INSERT INTO processing_ack VALUES ('m-9', 'processing', ?)").run(claimedAt);
     expect(_resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck')).toBe(1);
-    expect((inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get('m-9') as { status: string }).status).toBe('failed');
+    expect((inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get('m-9') as { status: string }).status).toBe(
+      'failed',
+    );
     // A message still within its tries is only rescheduled.
     inDb
-      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-8', 8, 'chat', ?, 'pending', 1, '{}')")
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-8', 8, 'chat', ?, 'pending', 1, '{}')",
+      )
       .run(claimedAt);
     outDb.prepare("INSERT INTO processing_ack VALUES ('m-8', 'processing', ?)").run(claimedAt);
     expect(_resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck')).toBe(0);
@@ -366,7 +372,9 @@ describe('resetStuckProcessingRows — chat crash retries', () => {
     const { inDb, outDb } = makeSessionDbs();
     const at = new Date(Date.now() - 60_000).toISOString();
     inDb
-      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('c-1', 1, 'chat', ?, 'pending', ?, '{}')")
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('c-1', 1, 'chat', ?, 'pending', ?, '{}')",
+      )
       .run(at, tries);
     outDb.prepare("INSERT INTO processing_ack VALUES ('c-1', 'processing', ?)").run(at);
     return { inDb, outDb };

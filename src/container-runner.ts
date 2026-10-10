@@ -61,7 +61,14 @@ import {
   type GatewaySessionInput,
   type GatewaySessionLease,
 } from './gateway-providers/index.js';
-import { admitSpawn, dropQueuedWake, drainSpawnQueue, queuedWakeCount, releaseSpawnSlot, requestIdlePreempt } from './spawn-admission.js'; // nanoclaw-fork
+import {
+  admitSpawn,
+  dropQueuedWake,
+  drainSpawnQueue,
+  queuedWakeCount,
+  releaseSpawnSlot,
+  requestIdlePreempt,
+} from './spawn-admission.js'; // nanoclaw-fork
 import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';

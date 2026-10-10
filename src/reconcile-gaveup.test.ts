@@ -27,7 +27,9 @@ describe('noticeGaveUp', () => {
     const writeDirect = vi.fn(async () => undefined);
     await noticeGaveUp({ writeDirect } as never, session(), 2);
     expect(writeDirect).toHaveBeenCalledTimes(1);
-    const m = writeDirect.mock.calls[0] as unknown as [{ kind: string; platformId: string; channelType: string; content: string }];
+    const m = writeDirect.mock.calls[0] as unknown as [
+      { kind: string; platformId: string; channelType: string; content: string },
+    ];
     expect(m[0]).toMatchObject({ kind: 'chat', platformId: 'telegram:42', channelType: 'telegram' });
     expect(JSON.parse(m[0].content).text).toContain('Пришли его ещё раз');
   });

@@ -17,7 +17,8 @@ function populate(): void {
   fs.mkdirSync(path.join(root, 'templates'));
   fs.writeFileSync(path.join(root, 'container', 'CLAUDE.md'), '# base');
   fs.mkdirSync(path.join(root, 'src', 'nc', 'templates'), { recursive: true });
-  for (const f of ['guest.md', 'friend-persona.md']) fs.writeFileSync(path.join(root, 'src', 'nc', 'templates', f), '#');
+  for (const f of ['guest.md', 'friend-persona.md'])
+    fs.writeFileSync(path.join(root, 'src', 'nc', 'templates', f), '#');
 }
 
 beforeEach(() => {
