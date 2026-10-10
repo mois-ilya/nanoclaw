@@ -189,17 +189,28 @@ let
     listen = { bind = "0.0.0.0"; hostBind = "0.0.0.0"; anthropicPort = 8080; connectPort = 3128; hostPort = 8090; adminSocket = adminSocket; };
   });
 
+  # The /run dirs below are NOT systemd RuntimeDirectory=: systemd re-chowns those recursively to the unit's
+  # user (root) before ExecStart, which would undo the 65532 ownership the container user needs.
   gatePrepare = mkScript "nanogate-prepare" [ pkgs.coreutils pkgs.jq pkgs.acl ] ''
     install -d -o 65532 -g 65532 -m 0750 ${gateStateDir}
+    mkdir -p /run/nanogate /run/nanogate-config /run/nanogate-secrets
     # /run/nanogate: only the container user and (via ACL, set after start)
     # the nanoclaw user may traverse it; the socket itself is 0600.
-    install -d -o 65532 -g 65532 -m 0700 /run/nanogate
-    install -d -m 0755 /run/nanogate-config
-    install -d -o 65532 -g 65532 -m 0500 /run/nanogate-secrets
+    chown 65532:65532 /run/nanogate /run/nanogate-secrets
+    chmod 0700 /run/nanogate
+    chmod 0500 /run/nanogate-secrets
+    chown root:root /run/nanogate-config
+    chmod 0755 /run/nanogate-config
+    rm -f /run/nanogate/admin.sock
     install -o 65532 -g 65532 -m 0400 "$CREDENTIALS_DIRECTORY/anthropic-key" /run/nanogate-secrets/anthropic_api_key
     install -o 65532 -g 65532 -m 0400 "$CREDENTIALS_DIRECTORY/nanogate-key" /run/nanogate-secrets/nanogate_key
     jq -s '.[0] + { prices: .[1] }' ${gateConfigBase} "$CREDENTIALS_DIRECTORY/prices" > /run/nanogate-config/config.json
     chmod 0444 /run/nanogate-config/config.json
+  '';
+
+  # Secrets copies live only while nanogate runs.
+  gateCleanup = mkScript "nanogate-cleanup" [ pkgs.coreutils ] ''
+    rm -rf /run/nanogate-secrets
   '';
 
   gateStart = mkScript "nanogate-start" [ podman ] ''
@@ -710,9 +721,8 @@ in
             "nanogate-key:${cfg.nanogate.encryptionKeyFile}"
             "prices:${cfg.nanogate.pricesFile}"
           ];
-          RuntimeDirectory = [ "nanogate" "nanogate-secrets" "nanogate-config" ];
-          RuntimeDirectoryPreserve = "no";
           ExecStartPre = "+${gatePrepare}/bin/nanogate-prepare";
+          ExecStopPost = "+${gateCleanup}/bin/nanogate-cleanup";
           ExecStart = "${gateStart}/bin/nanogate-start";
           ExecStartPost = "+${gateAfterStart}/bin/nanogate-acl";
           ExecReload = "${podman}/bin/podman kill --signal HUP nanogate";
@@ -865,12 +875,15 @@ in
         serviceConfig = {
           Type = "simple";
           LoadCredential = [ "authkey:${cfg.tailscale.owner.authKeyFile}" ];
-          RuntimeDirectory = "nanoclaw-ts-owner-secrets";
+          # Not RuntimeDirectory=: systemd would re-chown it to root before ExecStart.
           ExecStartPre = "+${pkgs.writeShellScript "nanoclaw-ts-owner-prepare" ''
             ${pkgs.coreutils}/bin/install -d -o 65532 -g 65532 -m 0700 ${tsStateDir}
-            ${pkgs.coreutils}/bin/install -o 65532 -g 65532 -m 0400 "$CREDENTIALS_DIRECTORY/authkey" /run/nanoclaw-ts-owner-secrets/authkey
+            ${pkgs.coreutils}/bin/mkdir -p /run/nanoclaw-ts-owner-secrets
             ${pkgs.coreutils}/bin/chown 65532:65532 /run/nanoclaw-ts-owner-secrets
+            ${pkgs.coreutils}/bin/chmod 0500 /run/nanoclaw-ts-owner-secrets
+            ${pkgs.coreutils}/bin/install -o 65532 -g 65532 -m 0400 "$CREDENTIALS_DIRECTORY/authkey" /run/nanoclaw-ts-owner-secrets/authkey
           ''}";
+          ExecStopPost = "+${pkgs.coreutils}/bin/rm -rf /run/nanoclaw-ts-owner-secrets";
           ExecStart = "${pkgs.writeShellScript "nanoclaw-ts-owner-start" ''
             exec ${podman}/bin/podman run --rm --replace --name nanoclaw-ts-owner --hostname nanoclaw-owner \
               --network conn-owner:alias=nanoclaw-ts-owner --network conn-uplink \
