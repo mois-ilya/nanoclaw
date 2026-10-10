@@ -725,7 +725,9 @@ in
         after = [ "network-online.target" "nanoclaw-images.service" "nanoclaw-networks.service" ];
         requires = [ "nanoclaw-images.service" "nanoclaw-networks.service" ];
         serviceConfig = {
-          Type = "simple";
+          # exec, not simple: with simple, systemd 258 spawns ExecStart and ExecStartPost concurrently and both set up
+          # credentials, which races ("Failed to set up credentials: Protocol error", status 243).
+          Type = "exec";
           LoadCredential = [
             "anthropic-key:${cfg.anthropicKeyFile}"
             "nanogate-key:${cfg.nanogate.encryptionKeyFile}"
