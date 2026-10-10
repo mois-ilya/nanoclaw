@@ -721,10 +721,12 @@ in
             "nanogate-key:${cfg.nanogate.encryptionKeyFile}"
             "prices:${cfg.nanogate.pricesFile}"
           ];
-          ExecStartPre = "+${gatePrepare}/bin/nanogate-prepare";
-          ExecStopPost = "+${gateCleanup}/bin/nanogate-cleanup";
+          # No "+" prefixes: the unit already runs as root without sandboxing, and on systemd 258 a "+" ExecStartPre
+          # left ExecStart unable to set up the same credentials ("Failed to set up credentials: Protocol error").
+          ExecStartPre = "${gatePrepare}/bin/nanogate-prepare";
+          ExecStopPost = "${gateCleanup}/bin/nanogate-cleanup";
           ExecStart = "${gateStart}/bin/nanogate-start";
-          ExecStartPost = "+${gateAfterStart}/bin/nanogate-acl";
+          ExecStartPost = "${gateAfterStart}/bin/nanogate-acl";
           ExecReload = "${podman}/bin/podman kill --signal HUP nanogate";
           Restart = "on-failure";
           RestartSec = 3;
