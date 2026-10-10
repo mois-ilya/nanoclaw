@@ -46,14 +46,14 @@ function healthyInspect(overrides: { agentNets?: string[]; auxNets?: string[]; a
   const nets = (names: string[], aliases: string[] = []) =>
     Object.fromEntries(names.map((n) => [n, { Aliases: n === NET ? aliases : [] }]));
   const agentDoc = [
-    { NetworkSettings: { Networks: nets(overrides.agentNets ?? [NET]) }, HostConfig: { NetworkMode: NET } },
+    { NetworkSettings: { Networks: nets(overrides.agentNets ?? [NET]) }, HostConfig: { NetworkMode: 'bridge' } },
   ];
   const auxDoc = [
     {
       NetworkSettings: {
         Networks: nets(overrides.auxNets ?? [NET, 'nanogate-svc'], overrides.alias === false ? [] : ['egress-proxy']),
       },
-      HostConfig: { NetworkMode: 'nanogate-svc', ExtraHosts: null, Privileged: false, CapAdd: null },
+      HostConfig: { NetworkMode: 'bridge', ExtraHosts: null, Privileged: false, CapAdd: null },
     },
   ];
   cli.responses = [
@@ -242,7 +242,7 @@ describe('session network and topology', () => {
     const bad = [
       {
         NetworkSettings: { Networks: { [NET]: { Aliases: ['egress-proxy'] }, 'nanogate-svc': {} } },
-        HostConfig: { NetworkMode: 'bridge', ExtraHosts: ['h:host-gateway'], Privileged: true, CapAdd: ['NET_ADMIN'] },
+        HostConfig: { NetworkMode: 'host', ExtraHosts: ['h:host-gateway'], Privileged: true, CapAdd: ['NET_ADMIN'] },
       },
     ];
     healthyInspect();

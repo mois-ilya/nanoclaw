@@ -14,6 +14,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createAgentGroup, getAgentGroupByFolder } from '../db/agent-groups.js';
+import { getActiveSessions, updateSession } from '../db/sessions.js';
 import {
   getContainerConfig,
   updateContainerConfigJson,
@@ -291,6 +292,22 @@ export async function bootstrapOwner(): Promise<{ nanogateOk: boolean }> {
     }
   }
   return { nanogateOk };
+}
+
+/**
+ * Close active sessions of agent groups no tenant owns (an earlier install of this database, a deleted life).
+ * They can never spawn (nanogate has no tenant for them), so the sweep would retry them forever and alert the owner.
+ */
+export async function closeOrphanSessions(): Promise<void> {
+  const owned = new Set((await listTenants()).map((t) => t.agent_group_id).filter((id): id is string => !!id));
+  for (const s of await getActiveSessions()) {
+    if (owned.has(s.agent_group_id)) continue;
+    log.warn('nc: closing session of an agent group without a tenant', {
+      sessionId: s.id,
+      agentGroupId: s.agent_group_id,
+    });
+    await updateSession(s.id, { status: 'closed' });
+  }
 }
 
 export function installResolver(): void {

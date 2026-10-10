@@ -352,6 +352,10 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
  * need to wrap — the inbound row stays pending and host-sweep retries on its
  * next tick.
  */
+// nanoclaw-fork: a session whose spawn keeps failing (topology check, tenant, image) must not respawn on every
+// reconcile tick. Consecutive failures back off 5s, 10s, 20s ... up to 5 min; a successful spawn resets it.
+const spawnBackoff = new Map<string, { failures: number; until: number }>();
+
 export function wakeContainer(session: Session): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
@@ -364,15 +368,25 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
+  const backoff = spawnBackoff.get(session.id);
+  if (backoff && Date.now() < backoff.until) {
+    log.debug('Container wake skipped: spawn backoff', { sessionId: session.id, failures: backoff.failures });
+    return Promise.resolve(false);
+  }
   // nanoclaw-fork: NC_MAX_CONTAINERS — over the cap the wake is queued (owner first); the queue restarts it.
   if (!admitSpawn(session, new Set(activeContainers.keys()))) {
     requestIdlePreempt(new Set(activeContainers.keys()));
     return Promise.resolve(false);
   }
   const promise = spawnContainer(session)
-    .then(() => true)
+    .then(() => {
+      spawnBackoff.delete(session.id);
+      return true;
+    })
     .catch((err) => {
-      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      const failures = (spawnBackoff.get(session.id)?.failures ?? 0) + 1;
+      spawnBackoff.set(session.id, { failures, until: Date.now() + Math.min(5_000 * 2 ** (failures - 1), 300_000) });
+      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, failures, err });
       emitHostError('container', session.id, err instanceof Error ? err.message.slice(0, 200) : 'wake failed'); // nanoclaw-fork
       return false;
     })

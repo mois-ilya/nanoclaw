@@ -23,7 +23,7 @@ import { installPlatformLayer } from './platform.js';
 import { startTaskFailureSweep, stopTaskFailureSweep } from './taskfail.js';
 import { resumeProvisioning } from './provision.js';
 import { setChatSurface, syncBotProfile } from './surface.js';
-import { bootstrapOwner, installResolver, loadTenantMap } from './tenants.js';
+import { bootstrapOwner, closeOrphanSessions, installResolver, loadTenantMap } from './tenants.js';
 
 export { consumeBudgetNote } from './budget.js';
 
@@ -47,6 +47,7 @@ onHostPrepare(async () => {
   await loadTenantMap();
   try {
     prepared = await bootstrapOwner();
+    await closeOrphanSessions();
   } catch (err) {
     log.error('nc: owner bootstrap failed before inbound release; retrying at host start', { err });
   }

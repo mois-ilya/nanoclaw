@@ -36,18 +36,22 @@ let
 
   # ---------------------------------------------------------------- firewall
   # Rules by role (v8 decision B1). Each rule is rendered for the iptables or
-  # the nftables backend; "return"/"accept" means "no objection from this
-  # chain", never a global accept.
+  # the nftables backend; "pass" means "no objection from this chain", never a
+  # global accept. Only bridge DNS (dnsRules) is a real accept.
   net = cfg.network;
   rfc1918 = [ "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" ];
   uplinkSubnets = [ net.egressSubnet ] ++ optionals cfg.tailscale.owner.enable [ net.connUplinkSubnet ];
   internalSubnets = [ net.svcSubnet ] ++ optionals cfg.tailscale.owner.enable [ net.connOwnerSubnet ];
 
+  dnsRules =
+    map (s: { src = s; dst = s; proto = "udp"; dport = 53; verdict = "accept"; }) ([ net.sessionPool ] ++ internalSubnets ++ uplinkSubnets)
+    ++ map (s: { src = s; dst = s; proto = "tcp"; dport = 53; verdict = "accept"; }) ([ net.sessionPool ] ++ internalSubnets ++ uplinkSubnets);
+
   inputRules =
     [ { ct = true; verdict = "pass"; } ]
-    # aardvark-dns answers on each bridge's gateway address.
-    ++ map (s: { src = s; dst = s; proto = "udp"; dport = 53; verdict = "pass"; }) ([ net.sessionPool ] ++ internalSubnets ++ uplinkSubnets)
-    ++ map (s: { src = s; dst = s; proto = "tcp"; dport = 53; verdict = "pass"; }) ([ net.sessionPool ] ++ internalSubnets ++ uplinkSubnets)
+    # aardvark-dns answers on each bridge's gateway address. A real accept, not "no objection": the host firewall
+    # (nixos-fw) only trusts podman0 for DNS and would refuse queries from our bridges (podman1.., session nets).
+    ++ dnsRules
     ++ map (s: { src = s; verdict = "drop"; }) ([ net.sessionPool ] ++ internalSubnets ++ uplinkSubnets);
 
   forwardRules =
@@ -72,7 +76,7 @@ let
       ++ optionals (r ? dstNot) [ "!" "-d" r.dstNot ]
       ++ optionals (r ? proto) [ "-p" r.proto "--dport" (toString r.dport) ]
       ++ optionals (r.ct or false) [ "-m" "conntrack" "--ctstate" "ESTABLISHED,RELATED" ]
-      ++ [ "-j" (if r.verdict == "drop" then "DROP" else "RETURN") ]
+      ++ [ "-j" (if r.verdict == "drop" then "DROP" else if r.verdict == "accept" then "ACCEPT" else "RETURN") ]
     );
 
   renderNft = r:
@@ -808,6 +812,8 @@ in
     })
     (mkIf (cfg.firewall.backend != "none" && fwBackend == "nftables") {
       networking.nftables.tables.nanoclaw = { family = "inet"; content = nftContent; };
+      # An nft accept ends only its own base chain: the NixOS input chain must accept bridge DNS itself.
+      networking.firewall.extraInputRules = concatStringsSep "\n" (map renderNft dnsRules);
     })
 
     (mkIf cfg.miniapp.enable {

@@ -934,7 +934,8 @@ interface InspectDoc {
   };
 }
 
-const FORBIDDEN_NETWORK_MODE = /^(host|bridge|pasta|slirp|container:|ns:)/i;
+// Podman 5 reports `bridge` for any container on user-defined bridge networks; the network set is checked separately.
+const FORBIDDEN_NETWORK_MODE = /^(host|pasta|slirp|container:|ns:)/i;
 
 /**
  * Inspect the realized objects and return every deviation from the intended
