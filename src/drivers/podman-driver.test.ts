@@ -66,6 +66,7 @@ function healthyInspect(overrides: { agentNets?: string[]; auxNets?: string[]; a
       output: JSON.stringify([{ internal: true, options: { isolate: 'true' } }]),
     },
     { match: /^network exists /, throws: new Error('exit status 1') },
+    { match: /^container exists /, throws: new Error('exit status 1') },
     { match: /^network ls --format/, output: 'podman\n' },
     { match: /^network inspect podman$/, output: JSON.stringify([{ subnets: [{ subnet: '10.88.0.0/16' }] }]) },
   ];
@@ -253,6 +254,17 @@ describe('session network and topology', () => {
     await expect(driver().prepare(gatedFixture())).rejects.toMatchObject({ detail: 'topology_mismatch' });
     const problems = (log.error as ReturnType<typeof vi.fn>).mock.calls[0][1].problems as string[];
     expect(problems.join(' ')).toMatch(/network_mode.*host_gateway.*privileged.*cap_add/);
+  });
+
+  it('removes an auxiliary container left from an earlier session before creating', async () => {
+    healthyInspect();
+    cli.responses.unshift({ match: /^container exists ncl-spike-s1-egress-proxy$/, output: '' });
+    await driver().prepare(gatedFixture());
+    const calls = cli.calls.map((c: { args: string[] }) => c.args.join(' '));
+    const rm = calls.indexOf('rm --force ncl-spike-s1-egress-proxy');
+    const create = calls.findIndex((c: string) => c.startsWith('network create'));
+    expect(rm).toBeGreaterThanOrEqual(0);
+    expect(rm).toBeLessThan(create);
   });
 
   it('fails closed when the network is not internal/isolated', async () => {

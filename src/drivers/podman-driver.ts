@@ -237,6 +237,9 @@ export class PodmanSessionDriver implements SessionDriver {
     const created: string[] = [];
     try {
       if (privateNetwork) {
+        // An auxiliary container can outlive its agent (host restarted mid-session): it keeps the old network
+        // attached, so the network and the names below would conflict. The agent is gone (checked above): clear them.
+        for (const auxiliaryName of auxiliaryNames) this.#removeStaleContainer(auxiliaryName);
         this.#removeStaleNetwork(privateNetwork);
         this.#createSessionNetwork(spec, privateNetwork);
         for (let i = 0; i < extra.length; i++) {
@@ -315,6 +318,20 @@ export class PodmanSessionDriver implements SessionDriver {
   }
 
   /** A leftover network of the same name (no live agent) would turn create into a conflict. */
+  #removeStaleContainer(name: string): void {
+    try {
+      this.#cli.run(['container', 'exists', name]);
+    } catch {
+      return; // absent (exit 1) — the normal case
+    }
+    log.warn('Removing a stale auxiliary container left from an earlier session', { containerName: name });
+    try {
+      this.#cli.run(['rm', '--force', name]);
+    } catch {
+      /* the create below fails loudly */
+    }
+  }
+
   #removeStaleNetwork(name: string): void {
     try {
       this.#cli.run(['network', 'exists', name]);
@@ -1056,6 +1073,9 @@ export function normalizePodmanError(error: unknown): Error & SessionFailure {
         : /no space left|cannot allocate memory/i.test(msg)
           ? { kind: 'resources-exhausted', retryable: true }
           : { kind: 'unknown', retryable: false, opaqueRef: `podman-${Date.now()}` };
+  // The failure kind is all callers see: keep podman's own words in the log, or an "unknown" is undiagnosable.
+  if (failure.kind === 'unknown')
+    log.error('Podman operation failed', { ref: failure.opaqueRef, detail: msg.slice(0, 600) });
   return asFailureError(failure);
 }
 
