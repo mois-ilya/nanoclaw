@@ -48,8 +48,10 @@ import { nc, ownerTgId, platformIdOf, presetConfig, tgIdOfUserId, userIdOf } fro
 import {
   gateIdOf,
   getTenantByTg,
+  getPrefs,
   insertTenantIfAbsent,
   kvGet,
+  kvSet,
   listTenants,
   updateTenant,
   type Egress,
@@ -285,12 +287,19 @@ export async function bootstrapOwner(): Promise<{ nanogateOk: boolean }> {
     created = true;
   }
   await initGroupFilesystem(ag, { instructions: ownerPersona({ tz: nc.defaultTz() }) });
+  // The owner starts on the same preset as the Mini App shows (prefs default «normal», Sonnet): Opus on every cold
+  // start was the main cost. Existing installs are moved once; later changes come from the Mini App.
+  const prefs = await getPrefs(userId, { tz: nc.defaultTz() });
+  const preset = presetConfig(prefs.preset);
+  if (!created && (await getContainerConfig(ag.id)) && (await kvGet('owner-preset-synced')) !== '1') {
+    await updateContainerConfigScalars(ag.id, { model: preset.model, effort: preset.effort });
+  }
+  await kvSet('owner-preset-synced', '1');
   if (created || !(await getContainerConfig(ag.id))) {
-    const deep = presetConfig('deep');
     await updateContainerConfigScalars(ag.id, {
       cli_scope: 'global',
-      model: deep.model,
-      effort: deep.effort,
+      model: preset.model,
+      effort: preset.effort,
       timezone: nc.defaultTz(),
       assistant_name: nc.botName(),
     });
