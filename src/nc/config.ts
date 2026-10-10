@@ -67,6 +67,7 @@ export const nc = {
   miniappStaticDir: () => setting('NC_MINIAPP_STATIC_DIR'),
   botToken: readBotToken,
   sttUrl: () => setting('NC_STT_URL'),
+  groqSttModel: () => setting('NC_GROQ_STT_MODEL') || 'whisper-large-v3',
   guestPlaceholder: () => setting('NC_GUEST_PLACEHOLDER') === '1',
   nanogateHostUrl: () => setting('NC_NANOGATE_HOST_URL') || 'http://127.0.0.1:8090',
   ownerName: () => setting('NC_OWNER_NAME') || 'Илья',

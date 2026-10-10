@@ -315,6 +315,10 @@ let
     if [ -d ${cfg.stateDir}/groups ]; then
       tar --zstd -C ${cfg.stateDir} -cf "$dest/groups.tar.zst" groups
     fi
+    # Groq key saved from the Mini App (host-only, not in the DB): copied 0600 next to the snapshots.
+    if [ -f ${cfg.stateDir}/data/secrets/groq_api_key ]; then
+      install -D -m 0600 ${cfg.stateDir}/data/secrets/groq_api_key "$dest/secrets/groq_api_key"
+    fi
     ok=1
     echo "backup written: $dest"
   '';
@@ -374,6 +378,7 @@ let
     NC_TEMPLATES_DIR = "${hostPackageDir}/nc-templates";
   }
   // lib.optionalAttrs cfg.stt.enable { NC_STT_URL = "http://127.0.0.1:${toString cfg.stt.port}"; }
+  // { NC_GROQ_STT_MODEL = cfg.stt.groqModel; }
   // lib.optionalAttrs cfg.stopButton { NC_STOP_ENABLED = "1"; }
   // lib.optionalAttrs (cfg.botName != null) { NC_BOT_NAME = cfg.botName; }
   // lib.optionalAttrs (cfg.ownerName != null) { NC_OWNER_NAME = cfg.ownerName; }
@@ -600,6 +605,16 @@ in
         description = "A pinned model name from this flake, or a path to any ggml model file.";
       };
       port = mkOption { type = types.port; default = 8091; };
+      groqKeyFile = mkOption {
+        type = types.nullOr (types.either types.path types.str);
+        default = null;
+        description = ''
+          File with a Groq API key (e.g. a sops secret), delivered through systemd LoadCredential as NC_GROQ_KEY_FILE.
+          With a key, voice goes to Groq Whisper first and falls back to the local whisper server. A key saved in
+          the Mini App (Подключения) takes precedence over this one.
+        '';
+      };
+      groqModel = mkOption { type = types.str; default = "whisper-large-v3"; description = "Groq transcription model (NC_GROQ_STT_MODEL)."; };
       threads = mkOption { type = types.ints.positive; default = 3; };
       memoryMax = mkOption { type = types.str; default = "1536M"; description = "whisper small + ffmpeg conversion needs ~0.9-1 GB; at 1G it thrashes against the cap (a 6 s clip took >60 s)."; };
     };
@@ -761,9 +776,11 @@ in
           SupplementaryGroups = [ "podman" ];
           Slice = "nanoclaw.slice";
           WorkingDirectory = cfg.stateDir;
-          LoadCredential = [ "telegram-token:${cfg.telegram.tokenFile}" ];
+          LoadCredential = [ "telegram-token:${cfg.telegram.tokenFile}" ]
+            ++ lib.optional (cfg.stt.groqKeyFile != null) "groq-key:${toString cfg.stt.groqKeyFile}";
           # %d: the credentials directory (not escaped, unlike `environment`).
-          Environment = [ "TELEGRAM_BOT_TOKEN_FILE=%d/telegram-token" ];
+          Environment = [ "TELEGRAM_BOT_TOKEN_FILE=%d/telegram-token" ]
+            ++ lib.optional (cfg.stt.groqKeyFile != null) "NC_GROQ_KEY_FILE=%d/groq-key";
           ExecStartPre = [
             "+${layoutScript}/bin/nanoclaw-layout"
             "+${upgradeScript}/bin/nanoclaw-upgrade-prestart"

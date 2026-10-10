@@ -23,6 +23,15 @@ import { dmSession, injectChat } from '../chat.js';
 import { activeTurnInChat } from '../port.js';
 import { invalidateBudget } from '../budget.js';
 import { approveRequest, denyRequest } from '../decisions.js';
+import {
+  GROQ_KEY_RE,
+  anyGroqKeyInvalid,
+  miniappKeyDir,
+  miniappKeyPath,
+  resetGroqKeyState,
+  resolveGroqKey,
+  usableGroqKey,
+} from '../groq-key.js';
 import { nc, ownerTgId, presetConfig, tgIdOfUserId, USD, userIdOf, type Preset } from '../config.js';
 import { ownerConnectorConfigured, ownerConnectorStatus, syncOwnerConnector } from '../connector.js';
 import {
@@ -714,8 +723,29 @@ const connections: Handler = async ({ tenant, isOwner }) => {
       haToken = null;
     }
   }
-  return ok({ connections: [conn], egress: await egressView(tenant, isOwner), ...(isOwner ? { haToken } : {}) });
+  return ok({
+    connections: [conn],
+    egress: await egressView(tenant, isOwner),
+    ...(isOwner ? { haToken, stt: sttView() } : {}),
+  });
 };
+
+/** Which transcriber is live. Never the key. */
+function sttView(): {
+  provider: 'groq' | 'local' | 'none';
+  groqKey: { source: 'miniapp' | 'server'; savedAt?: string } | null;
+  groqKeyInvalid?: boolean;
+} {
+  const usable = usableGroqKey();
+  const k = usable ?? resolveGroqKey();
+  const invalid = anyGroqKeyInvalid();
+  const provider = usable ? 'groq' : nc.sttUrl() ? 'local' : 'none';
+  return {
+    provider,
+    groqKey: k ? { source: k.source, ...(k.savedAt ? { savedAt: k.savedAt } : {}) } : null,
+    ...(invalid ? { groqKeyInvalid: true } : {}),
+  };
+}
 
 const SERVER_MANAGED = 'Управляется сервером';
 
@@ -782,6 +812,44 @@ const haTokenDelete: Handler = async ({ tenant }) => {
   const dir = secretsDir(await folderOf(tenant));
   fs.rmSync(path.join(dir, 'ha_token'), { force: true });
   await audit(tenant.user_id, 'ha_token_removed', tenant.user_id);
+  return noContent;
+};
+
+// ---------- Groq key (owner only, write-only; host-only file, never under groups/) ----------
+
+const groqKeyPut: Handler = async ({ tenant, body }) => {
+  const key = typeof body.key === 'string' ? body.key.trim() : '';
+  if (!GROQ_KEY_RE.test(key)) throw bad('Это не похоже на ключ Groq (gsk_…)');
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.status === 401 || res.status === 403) throw bad('Ключ не подошёл');
+  } catch (err) {
+    if (err instanceof ApiError) throw err; // network trouble or timeout: save anyway
+  }
+  const dir = miniappKeyDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  const file = miniappKeyPath();
+  const tmp = `${file}.${process.pid}.tmp`;
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600);
+  try {
+    fs.writeSync(fd, `${key}\n`);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, file);
+  resetGroqKeyState();
+  await audit(tenant.user_id, 'groq_key_saved', tenant.user_id); // never the value
+  return noContent;
+};
+
+const groqKeyDelete: Handler = async ({ tenant }) => {
+  fs.rmSync(miniappKeyPath(), { force: true });
+  resetGroqKeyState();
+  await audit(tenant.user_id, 'groq_key_removed', tenant.user_id);
   return noContent;
 };
 
@@ -1079,6 +1147,8 @@ export const routes: Route[] = [
   { method: 'DELETE', re: /^\/api\/connections\/tailscale$/, handler: tsDelete },
   { method: 'PUT', re: /^\/api\/owner\/secrets\/ha-token$/, handler: haTokenPut, owner: true },
   { method: 'DELETE', re: /^\/api\/owner\/secrets\/ha-token$/, handler: haTokenDelete, owner: true },
+  { method: 'PUT', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyPut, owner: true },
+  { method: 'DELETE', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyDelete, owner: true },
   { method: 'PUT', re: /^\/api\/egress$/, handler: egressPut },
   { method: 'GET', re: /^\/api\/settings$/, handler: settingsGet },
   { method: 'PATCH', re: /^\/api\/settings$/, handler: settingsPatch },

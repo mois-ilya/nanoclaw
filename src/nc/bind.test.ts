@@ -17,11 +17,11 @@ afterEach(() => {
   delete process.env.NC_STT_URL;
 });
 
-it('registers no transcriber when NC_STT_URL is unset (voice gets the «не включена» copy)', () => {
+it('always registers the transcriber (Groq-only setups and a key saved later still get voice)', () => {
   delete process.env.NC_STT_URL;
   const h = hooks();
   registerHooks(h);
-  expect(h.setTranscriber).not.toHaveBeenCalled();
+  expect(h.setTranscriber).toHaveBeenCalledTimes(1);
   expect(h.setPrivateGate).toHaveBeenCalled();
 });
 

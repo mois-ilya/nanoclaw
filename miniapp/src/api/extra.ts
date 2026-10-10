@@ -2,6 +2,12 @@
 // so additions live here until the backend contract carries them; every field is optional and the UI degrades without it.
 import type { Connection, GuestContext, SystemView, UsageView } from './types';
 
+/** `GET /api/connections` (owner): the live speech-to-text provider and where the Groq key came from. */
+export interface SttView {
+  provider: 'groq' | 'local' | 'none';
+  groqKey: { source: 'miniapp' | 'server'; savedAt?: string } | null;
+  groqKeyInvalid?: boolean;
+}
 export interface AuditRow { at: string; actor: string; action: string; target?: string }
 export interface SystemViewX extends SystemView {
   buildId?: string; deployedAt?: string; grafanaUrl?: string; recentAudit?: AuditRow[];

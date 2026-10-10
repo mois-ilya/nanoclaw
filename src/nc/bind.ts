@@ -24,8 +24,9 @@ export function registerHooks(h: AdapterHooks): void {
   h.setPrivateGate(privateGate);
   h.setCommandHandler(commandHandler);
   h.setProductCallbackHandler(productCallback);
-  // Without an STT backend the adapter has no transcriber and answers voice with the «не включена» copy.
-  if (nc.sttUrl()) h.setTranscriber((audio, meta) => transcribe(audio, meta));
+  // Always registered: the backend (Groq key, possibly saved later, or local whisper) is picked per call, and
+  // transcribe() answers `failed` when there is none.
+  h.setTranscriber((audio, meta) => transcribe(audio, meta));
   h.setGuestHandler((msg) => guestHandler(msg));
   h.setStopHandler(stopHandler);
 }

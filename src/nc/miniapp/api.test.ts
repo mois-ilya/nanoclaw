@@ -350,6 +350,75 @@ describe('tenant scoping of data routes', () => {
     expect(fs.existsSync(file)).toBe(false);
   });
 
+  it('the Groq key is owner-only, host-only (DATA_DIR/secrets, 0600), verified, never read back', async () => {
+    const good = `gsk_${'A1b2'.repeat(10)}`;
+    const real = globalThis.fetch;
+    let groqStatus = 200;
+    let groqThrows = false;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).startsWith('https://api.groq.com/')) {
+        if (groqThrows) throw new Error('offline');
+        return new Response('{}', { status: groqStatus });
+      }
+      return real(input, init);
+    });
+    try {
+      const { token: ft } = await login(FRIEND_A);
+      expect((await call(ft, 'PUT', '/api/owner/secrets/groq-key', { key: good })).status).toBe(403);
+      const { token } = await login(OWNER);
+      expect((await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: 'nope' })).status).toBe(400);
+      groqStatus = 401;
+      expect((await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: good })).status).toBe(400);
+      groqStatus = 200;
+      expect((await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: good })).status).toBe(204);
+      const file = path.join(TMP, 'data', 'secrets', 'groq_api_key');
+      expect(fs.readFileSync(file, 'utf8').trim()).toBe(good);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+      const text = await (await call(token, 'GET', '/api/connections')).text();
+      expect(text).not.toContain(good);
+      const st = JSON.parse(text) as { stt: { provider: string; groqKey: { source: string; savedAt: string } } };
+      expect(st.stt.provider).toBe('groq');
+      expect(st.stt.groqKey.source).toBe('miniapp');
+      expect(Date.parse(st.stt.groqKey.savedAt)).toBeGreaterThan(0);
+      expect(
+        ((await (await call(ft, 'GET', '/api/connections')).json()) as Record<string, unknown>).stt,
+      ).toBeUndefined();
+      // network failure on verification: saved anyway
+      groqThrows = true;
+      expect((await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: `gsk_${'Z9'.repeat(15)}` })).status).toBe(
+        204,
+      );
+      expect((await call(token, 'DELETE', '/api/owner/secrets/groq-key')).status).toBe(204);
+      expect(fs.existsSync(file)).toBe(false);
+      const after = (await (await call(token, 'GET', '/api/connections')).json()) as {
+        stt: { groqKey: unknown; provider: string };
+      };
+      expect(after.stt.groqKey).toBeNull();
+      expect(after.stt.provider).toBe('none');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a server-provided Groq key is reported as such and survives DELETE', async () => {
+    const srv = path.join(TMP, 'srv-groq');
+    fs.mkdirSync(TMP, { recursive: true });
+    fs.writeFileSync(srv, `gsk_${'S'.repeat(30)}\n`);
+    process.env.NC_GROQ_KEY_FILE = srv;
+    try {
+      const { token } = await login(OWNER);
+      expect((await call(token, 'DELETE', '/api/owner/secrets/groq-key')).status).toBe(204);
+      const st = (await (await call(token, 'GET', '/api/connections')).json()) as {
+        stt: { provider: string; groqKey: { source: string } };
+      };
+      expect(st.stt.provider).toBe('groq');
+      expect(st.stt.groqKey.source).toBe('server');
+    } finally {
+      delete process.env.NC_GROQ_KEY_FILE;
+    }
+  });
+
   it('a friend cannot switch to residential egress unless the owner enabled it', async () => {
     process.env.NC_OWNER_CONNECTOR_SOCKS = '10.91.2.2:1055';
     const { token } = await login(FRIEND_A);

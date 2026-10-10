@@ -1,10 +1,15 @@
-/** Voice transcription: HTTP to a local whisper-server (`POST /inference`). */
+/** Voice transcription: Groq Whisper when a key is set, else (or on failure) a local whisper-server (`POST /inference`). */
 import { log } from '../log.js';
 import { nc } from './config.js';
+import { markGroqKeyInvalid, usableGroqKey } from './groq-key.js';
 import type { TranscribeResult } from './port.js';
 import { recordVoice } from './store.js';
 
 export const MAX_VOICE_SECONDS = 300;
+export const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_TIMEOUT_MS = 30_000;
+/** Groq free tier file limit; bigger audio goes straight to the local server. */
+export const GROQ_MAX_BYTES = 25 * 1024 * 1024;
 /** Whisper-server is serial; time spent waiting in our own queue never counts against the HTTP timeout. */
 const QUEUE_WAIT_MAX_MS = 10 * 60_000;
 /** Spike I tunes these on the target host. */
@@ -135,19 +140,97 @@ export function judgeSegments(segments: Segment[] | undefined): { silent: boolea
   return { silent: avg < AVG_LOGPROB_MIN, confidence: Math.max(0, Math.min(1, Math.exp(avg))) };
 }
 
+/**
+ * File name Groq accepts for a MIME type. Telegram voice is OGG/Opus, and Groq rejects `.oga`, so ogg-ish
+ * (and unknown) types are always sent as `voice.ogg`.
+ */
+export function groqFilename(mime: string): string {
+  const m = (mime || '').toLowerCase();
+  if (/flac/.test(m)) return 'voice.flac';
+  if (/mpeg|mp3|mpga/.test(m)) return 'voice.mp3';
+  if (/m4a/.test(m)) return 'voice.m4a';
+  if (/mp4/.test(m)) return m.startsWith('video/') ? 'voice.mp4' : 'voice.m4a';
+  if (/wav/.test(m)) return 'voice.wav';
+  if (/webm/.test(m)) return 'voice.webm';
+  return 'voice.ogg';
+}
+
+interface GroqBody {
+  text?: unknown;
+  language?: unknown;
+  duration?: unknown;
+  segments?: Segment[];
+}
+
+/** One Groq request. Returns the parsed body, or null when the caller should fall back to the local server. */
+async function groqTranscribe(
+  audio: Buffer,
+  meta: { mime: string },
+  key: string,
+  fetchFn: typeof fetch,
+): Promise<GroqBody | null> {
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(audio)], { type: meta.mime || 'audio/ogg' }), groqFilename(meta.mime));
+  form.append('model', nc.groqSttModel());
+  form.append('response_format', 'verbose_json');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), GROQ_TIMEOUT_MS);
+  try {
+    const res = await fetchFn(GROQ_URL, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}` },
+      body: form,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) markGroqKeyInvalid(key);
+      log.warn('nc: groq stt failed', { kind: 'http', status: res.status });
+      return null;
+    }
+    return (await res.json()) as GroqBody;
+  } catch {
+    log.warn('nc: groq stt failed', { kind: ctrl.signal.aborted ? 'timeout' : 'network' });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function transcribe(
   audio: Buffer,
   meta: { mime: string; durationS: number; userId: number },
   fetchFn: typeof fetch = fetch,
 ): Promise<TranscribeResult> {
   if (meta.durationS > MAX_VOICE_SECONDS) return { error: 'too_long' };
+  const knownS = meta.durationS > 0;
+  const budgetS = knownS ? meta.durationS : estimateDurationS(audio.length);
+  const groq = audio.length <= GROQ_MAX_BYTES ? usableGroqKey() : null;
+  if (groq) {
+    const startedAt = Date.now();
+    let body = await groqTranscribe(audio, meta, groq.key, fetchFn);
+    // A parked Mini App key falls through to the server key before going local.
+    if (!body) {
+      const next = usableGroqKey();
+      if (next && next.key !== groq.key) body = await groqTranscribe(audio, meta, next.key, fetchFn);
+    }
+    if (body) {
+      log.info('nc: stt done', { provider: 'groq', audioS: meta.durationS, ms: Date.now() - startedAt });
+      const reportedS = typeof body.duration === 'number' && body.duration > 0 ? Math.ceil(body.duration) : 0;
+      const countedS = knownS ? meta.durationS : reportedS > 0 ? Math.min(MAX_VOICE_SECONDS, reportedS) : budgetS;
+      await recordVoice(`telegram:${meta.userId}`, countedS).catch(() => undefined);
+      const text = typeof body.text === 'string' ? body.text.replace(/\s+/g, ' ').trim() : '';
+      if (!text || isHallucination(text)) return { error: 'empty' };
+      const verdict = judgeSegments(body.segments);
+      if (verdict.silent) return { error: 'empty' };
+      const lang = typeof body.language === 'string' ? body.language : undefined;
+      return { text, lang, ...(verdict.confidence !== undefined ? { confidence: verdict.confidence } : {}) };
+    }
+  }
   const base = nc.sttUrl();
   if (!base) {
     log.warn('nc: NC_STT_URL is not set; voice transcription unavailable');
     return { error: 'failed' };
   }
-  const knownS = meta.durationS > 0;
-  const budgetS = knownS ? meta.durationS : estimateDurationS(audio.length);
   const form = new FormData();
   form.append('file', new Blob([new Uint8Array(audio)], { type: meta.mime || 'audio/ogg' }), 'voice.ogg');
   form.append('response_format', 'verbose_json');

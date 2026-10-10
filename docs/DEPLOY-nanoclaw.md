@@ -21,6 +21,8 @@ nix-shell -p sops --run "sops -d secrets/secrets.yaml" > /tmp/secrets.yaml
 cp /tmp/secrets.yaml secrets/secrets.yaml && nix-shell -p sops --run "sops -e -i secrets/secrets.yaml"
 ```
 
+**Ключ Groq (необязательно, быстрый и точный голос).** Sops-секрет `nanoclaw/groq_api_key` указывается в `services.nanoclaw.stt.groqKeyFile = config.sops.secrets."nanoclaw/groq_api_key".path;` (модель: `stt.groqModel`, по умолчанию `whisper-large-v3`). Либо владелец вводит ключ в Mini App: Подключения, «Распознавание голоса». Ключ из Mini App имеет приоритет над серверным; хранится в `data/secrets/groq_api_key` (0600) и агентам не виден. Локальный whisper остаётся запасным: при ошибке Groq, лимите 429, неверном ключе или файле больше 25 МБ голос распознаётся локально.
+
 Файлы читаются systemd через `LoadCredential`, поэтому подходят права root `0400`. Ключ `nanogate_key` после запуска не менять: сохранённые токены перестанут расшифровываться.
 
 ## 2. Роутер и tailnet (домашний выход)

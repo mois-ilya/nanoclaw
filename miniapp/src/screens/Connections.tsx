@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { EgressView } from '../api/types';
-import type { ConnectionX } from '../api/extra';
+import type { ConnectionX, SttView } from '../api/extra';
 import { useApp, useApi, invalidate } from '../ctx';
 import { ago, dateShort } from '../format';
 import * as tg from '../tg';
 import { ActionBar, Btn, Chip, Hint, Loadable, Row, Screen, Section, Segmented, useAction } from '../ui';
 
-interface Data { connections: ConnectionX[]; egress: EgressView; haToken?: { savedAt: string } | null }
+interface Data { connections: ConnectionX[]; egress: EgressView; haToken?: { savedAt: string } | null; stt?: SttView }
 
 const STATUS: Record<ConnectionX['status'], [('ok' | 'warn' | 'bad' | undefined), string]> = {
   not_connected: [undefined, 'Не подключено'], connecting: ['warn', 'Подключаюсь…'], connected: ['ok', 'Подключено'], error: ['bad', 'Ошибка'], expired: ['bad', 'Ключ истёк'],
@@ -18,6 +18,7 @@ export function Connections() {
   const act = useAction(toast);
   const [key, setKey] = useState('');
   const [ha, setHa] = useState('');
+  const [groq, setGroq] = useState('');
   const ts = res.data?.connections.find((c) => c.id === 'tailscale');
   // The owner's connector is run by the server: the backend rejects key changes and revocation (409), so the SPA offers neither.
   const managed = ts?.managed ?? me.role === 'owner';
@@ -48,6 +49,16 @@ export function Connections() {
     const done = await act.run(() => api.del('/api/owner/secrets/ha-token'), 'Токен удалён');
     if (done) { invalidate('/api/connections'); res.reload(); }
   }
+  async function saveGroq() {
+    const done = await act.run(() => api.put('/api/owner/secrets/groq-key', { key: groq.trim() }), 'Ключ сохранён');
+    if (done) { setGroq(''); invalidate('/api/connections'); res.reload(); }
+  }
+  async function removeGroq() {
+    const ok = await tg.confirm({ title: 'Удалить ключ?', message: 'Голос будет распознаваться локальной моделью, она медленнее.', okText: 'Удалить', destructive: true });
+    if (!ok) return;
+    const done = await act.run(() => api.del('/api/owner/secrets/groq-key'), 'Ключ удалён');
+    if (done) { invalidate('/api/connections'); res.reload(); }
+  }
   async function revoke() {
     const ok = await tg.confirm({ title: 'Отозвать доступ?', message: 'Ассистент перестанет подключаться к Tailscale. Ключ будет удалён.', okText: 'Отозвать', destructive: true });
     if (!ok) return;
@@ -67,7 +78,8 @@ export function Connections() {
   }
 
   const haDirty = ha.trim().length > 0 && me.role === 'owner';
-  const dirty = key.trim().length > 0 || haDirty;
+  const groqDirty = groq.trim().length > 0 && me.role === 'owner';
+  const dirty = key.trim().length > 0 || haDirty || groqDirty;
   return (
     <Screen title="Подключения" sub="Ключи и доступ" bar={dirty}>
       <Loadable res={res} rows={3}>
@@ -121,6 +133,22 @@ export function Connections() {
                 </Section>
               )}
 
+              {isOwner && d.stt && (
+                <Section header="Распознавание голоса" footer="Ключ Groq: console.groq.com → API Keys. Он только записывается: после сохранения его нигде не видно. Если Groq недоступен, голос распознаёт локальная модель.">
+                  <Row icon={{ name: 'connections', color: 'teal' }} title="Голосовые сообщения"
+                    sub={d.stt.provider === 'groq'
+                      ? (d.stt.groqKey?.source === 'server' ? 'Groq · ключ задан сервером' : `Groq · ключ сохранён ${d.stt.groqKey?.savedAt ? dateShort(d.stt.groqKey.savedAt, me.tz) : ''}`.trim())
+                      : d.stt.provider === 'local' ? 'Локальная модель (медленнее)' : 'Распознавание не настроено'}
+                    right={<Chip kind={d.stt.provider === 'groq' ? 'ok' : d.stt.provider === 'none' ? 'bad' : undefined}>{d.stt.provider === 'groq' ? 'Groq' : d.stt.provider === 'local' ? 'Локально' : 'Выкл.'}</Chip>} />
+                  {d.stt.groqKeyInvalid && <div class="quote" style="padding-top:2px;color:var(--danger)">Groq отклонил ключ, пока работает локальная модель. Замени ключ.</div>}
+                  <input class="field" style="border-top:0.5px solid var(--sep)" type="password" autocomplete="off" autocapitalize="off" spellcheck={false} placeholder={d.stt.groqKey ? 'Заменить ключ Groq' : 'Вставить ключ Groq'} value={groq} onInput={(e) => setGroq((e.target as HTMLInputElement).value)} aria-label="Ключ Groq" />
+                  <div class="btns" style="padding:8px 16px">
+                    <Btn kind="tint" onClick={saveGroq} disabled={act.busy || !groqDirty}>Сохранить</Btn>
+                    {d.stt.groqKey?.source === 'miniapp' && <Btn kind="danger" onClick={removeGroq} disabled={act.busy}>Удалить</Btn>}
+                  </div>
+                </Section>
+              )}
+
               {showEgress && (
                 <Section header="Выход в интернет" footer={d.egress.residentialAvailable
                   ? 'Через дом: запросы ассистента в интернет идут через твой домашний узел, сайты видят домашний адрес. Напрямую: с сервера ассистента.'
@@ -136,7 +164,9 @@ export function Connections() {
         }}
       </Loadable>
       <ActionBar
-        main={haDirty
+        main={groqDirty
+          ? { text: 'Сохранить ключ Groq', visible: true, progress: act.busy, onClick: saveGroq }
+          : haDirty
           ? { text: 'Сохранить токен', visible: true, progress: act.busy, onClick: saveHa }
           : { text: 'Сохранить ключ', visible: dirty && me.role === 'owner' && !managed, progress: act.busy, onClick: saveKey }}
         secondary={{ text: 'Отозвать', visible: me.role === 'owner' && !managed && !!ts && ts.status !== 'not_connected' && !dirty, destructive: true, nativeOnly: true, onClick: revoke }}
