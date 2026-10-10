@@ -22,3 +22,13 @@ describe('runner config speed', () => {
     expect(runnerConfigFromRaw({ speed: 7 }).speed).toBeUndefined();
   });
 });
+
+describe('disabledNanoclawTools', () => {
+  it('defaults to none and keeps only strings', () => {
+    expect(runnerConfigFromRaw({}).disabledNanoclawTools).toEqual([]);
+    expect(runnerConfigFromRaw({ disabledNanoclawTools: 'x' }).disabledNanoclawTools).toEqual([]);
+    expect(runnerConfigFromRaw({ disabledNanoclawTools: ['create_agent', 7] }).disabledNanoclawTools).toEqual([
+      'create_agent',
+    ]);
+  });
+});

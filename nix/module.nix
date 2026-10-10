@@ -380,6 +380,7 @@ let
   // lib.optionalAttrs cfg.stt.enable { NC_STT_URL = "http://127.0.0.1:${toString cfg.stt.port}"; }
   // { NC_GROQ_STT_MODEL = cfg.stt.groqModel; }
   // lib.optionalAttrs cfg.stopButton { NC_STOP_ENABLED = "1"; }
+  // { NC_TOOL_SEARCH = if cfg.toolSearch then "1" else "0"; NC_PROMPT_CACHE_1H = if cfg.promptCache1h then "1" else "0"; }
   // lib.optionalAttrs (cfg.botName != null) { NC_BOT_NAME = cfg.botName; }
   // lib.optionalAttrs (cfg.ownerName != null) { NC_OWNER_NAME = cfg.ownerName; }
   // lib.optionalAttrs (cfg.ownerNameGen != null) { NC_OWNER_NAME_GEN = cfg.ownerNameGen; }
@@ -564,6 +565,8 @@ in
       default = "Europe/Moscow";
       description = "Users' default time zone: NC_DEFAULT_TZ (tenant default, task schedules, digest, nanogate budget period) and the host TZ.";
     };
+    toolSearch = mkOption { type = types.bool; default = true; description = "Load MCP tool schemas on demand in agents (ENABLE_TOOL_SEARCH=true via NC_TOOL_SEARCH). Turn off if nanogate/Anthropic start rejecting requests with deferred tools."; };
+    promptCache1h = mkOption { type = types.bool; default = true; description = "1-hour prompt cache TTL in agents (CLAUDE_CODE_PROMPT_CACHE_TTL=1h via NC_PROMPT_CACHE_1H); 1h cache writes cost 2x base input instead of 1.25x."; };
     stopButton = mkOption { type = types.bool; default = true; description = "Native Stop button on drafts (NC_STOP_ENABLED=1)."; };
     botName = mkOption { type = types.nullOr types.str; default = null; description = "Assistant name in copy and container config (NC_BOT_NAME); the code default is «ассистент»."; };
     ownerName = mkOption { type = types.nullOr types.str; default = null; description = "Owner name, nominative (NC_OWNER_NAME)."; };

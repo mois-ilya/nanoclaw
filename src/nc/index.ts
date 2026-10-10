@@ -15,7 +15,7 @@ import { startBudgetPolling, stopBudgetPolling } from './budget.js';
 import { syncOwnerConnector } from './connector.js';
 import { ownerTgId, nc } from './config.js';
 import { prewarmGuestToken, recoverGuestPlaceholders } from './guest.js';
-import { purgeDueTrash } from './lifecycle.js';
+import { purgeDueTrash, removeLegacyHaTokens } from './lifecycle.js';
 import { startMiniAppServer, type RunningMiniApp } from './miniapp/server.js';
 import './migrations.js';
 import { startTurnMetrics } from './metrics.js';
@@ -44,6 +44,7 @@ let prepared: { nanogateOk: boolean } | undefined;
 // The owner bootstrap (agent group + DM wiring) also runs here: inbound routing is released right after prepare, and the
 // owner's earliest messages (replayed from the update journal) must find their wiring instead of the channel-approval flow.
 onHostPrepare(async () => {
+  removeLegacyHaTokens();
   await loadTenantMap();
   try {
     prepared = await bootstrapOwner();

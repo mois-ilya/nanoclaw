@@ -151,6 +151,14 @@ async function submitAddMcpServer(content: Record<string, unknown>, s: Session):
   await requestAddMcpServerHold(content, s);
 }
 
+/**
+ * Renderer-only path: validateAddMcpServer now refuses stdio servers from agents, but the card renderer still
+ * handles every config shape (operator-stamped and legacy rows), so its regression tests skip validation.
+ */
+async function renderCard(content: Record<string, unknown>, s: Session): Promise<void> {
+  await requestAddMcpServerHold(content, s);
+}
+
 /** Assert the handler rejected: no card delivered, no row, agent notified with a failure. */
 async function expectRejected(): Promise<string> {
   expect(delivered).toHaveLength(0);
@@ -163,7 +171,7 @@ async function expectRejected(): Promise<string> {
 
 describe('add_mcp_server approval card', () => {
   it('shows every arg and every env key/value verbatim', async () => {
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'evil',
         command: 'npx',
@@ -186,7 +194,7 @@ describe('add_mcp_server approval card', () => {
   });
 
   it('renders an explicit empty state when args/env are omitted', async () => {
-    await submitAddMcpServer({ name: 'plain', command: 'node' }, session);
+    await renderCard({ name: 'plain', command: 'node' }, session);
 
     const question = lastQuestion();
     expect(question).toContain('args: []');
@@ -208,7 +216,7 @@ describe('add_mcp_server approval card', () => {
   });
 
   it('cannot be spoofed by newlines embedded in payload values', async () => {
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'safe',
         command: 'node',
@@ -228,7 +236,7 @@ describe('add_mcp_server approval card', () => {
   });
 
   it('keeps markdown links and backticks inert inside a single intact fence', async () => {
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'safe',
         command: 'node',
@@ -251,7 +259,7 @@ describe('add_mcp_server approval card', () => {
   });
 
   it('renders bidi, zero-width, and BOM characters as visible escapes', async () => {
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'safe',
         command: 'node',
@@ -289,18 +297,25 @@ describe('add_mcp_server validation', () => {
     expect(await expectRejected()).toMatch(/owned by plugin "sdr"/);
   });
 
-  it('rejects an env key that is not a valid environment variable name', async () => {
-    await submitAddMcpServer({ name: 'ok', command: 'node', env: { 'BAD KEY': 'v' } }, session);
+  it('rejects a stdio command from an agent before creating an approval', async () => {
+    await submitAddMcpServer({ name: 'ok', command: 'node', args: ['server.js'], env: { FOO: 'bar' } }, session);
 
-    expect(await expectRejected()).toMatch(/valid environment variable name/);
+    expect(await expectRejected()).toMatch(/only remote HTTPS MCP servers/);
   });
 
-  it('rejects a cwd on a raw payload before creating an approval', async () => {
-    // cwd would be silently dropped at runtime (no pluginRoot to resolve
-    // against), so an approver must never be asked to sign it.
-    await submitAddMcpServer({ name: 'ok', command: 'node', cwd: '${PLUGIN_DATA}/work' }, session);
+  it('rejects headers before creating an approval', async () => {
+    await submitAddMcpServer(
+      { name: 'ok', url: 'https://mcp.example.com/mcp', headers: { 'X-Api-Version': '1' } },
+      session,
+    );
 
-    expect(await expectRejected()).toMatch(/only supported for plugin-shipped/);
+    expect(await expectRejected()).toMatch(/headers are not supported/);
+  });
+
+  it('rejects plain HTTP, even for localhost, before creating an approval', async () => {
+    await submitAddMcpServer({ name: 'ok', url: 'http://localhost:8080/mcp' }, session);
+
+    expect(await expectRejected()).toMatch(/must use HTTPS/);
   });
 
   it('rejects a credential-bearing URL before creating an approval', async () => {
@@ -315,79 +330,38 @@ describe('add_mcp_server validation', () => {
     expect(await expectRejected()).toMatch(/only valid with command/);
   });
 
-  it('rejects a non-string element in args before creating an approval', async () => {
-    await submitAddMcpServer({ name: 'bad', command: 'node', args: ['ok', 123] }, session);
-    await expectRejected();
-  });
-
-  it('rejects a non-record env before creating an approval', async () => {
-    await submitAddMcpServer({ name: 'bad', command: 'node', env: ['not', 'a', 'record'] }, session);
-    await expectRejected();
-  });
-
-  it('accepts 32 args and rejects 33', async () => {
-    await submitAddMcpServer(
-      { name: 'ok', command: 'node', args: Array.from({ length: 32 }, (_, i) => `a${i}`) },
-      session,
-    );
-    expect(delivered).toHaveLength(1);
-
-    delivered = [];
-    await submitAddMcpServer(
-      { name: 'bad', command: 'node', args: Array.from({ length: 33 }, (_, i) => `a${i}`) },
-      session,
-    );
-    expect(delivered).toHaveLength(0);
-    expect(lastNotifyText()).toMatch(/max 32 args/);
-  });
-
-  it('accepts 32 env vars and rejects 33', async () => {
-    const envOf = (n: number): Record<string, string> =>
-      Object.fromEntries(Array.from({ length: n }, (_, i) => [`K${i}`, 'v']));
-
-    await submitAddMcpServer({ name: 'ok', command: 'node', env: envOf(32) }, session);
-    expect(delivered).toHaveLength(1);
-
-    delivered = [];
-    await submitAddMcpServer({ name: 'bad', command: 'node', env: envOf(33) }, session);
-    expect(delivered).toHaveLength(0);
-    expect(lastNotifyText()).toMatch(/max 32 env vars/);
-  });
-
   it('accepts a card of exactly 1500 bytes and rejects one byte over', async () => {
     // Measure the fixed overhead with an empty filler arg, then pad the arg
     // (pure ASCII: 1 char = 1 byte) so the rendered question lands exactly
     // on the cap.
-    await submitAddMcpServer({ name: 'n', command: 'c', args: [''] }, session);
+    await renderCard({ name: 'n', command: 'c', args: [''] }, session);
     const base = Buffer.byteLength(lastQuestion(), 'utf8');
     const filler = 'a'.repeat(1500 - base);
 
     delivered = [];
-    await submitAddMcpServer({ name: 'n', command: 'c', args: [filler] }, session);
+    await renderCard({ name: 'n', command: 'c', args: [filler] }, session);
     expect(delivered).toHaveLength(1);
     expect(Buffer.byteLength(lastQuestion(), 'utf8')).toBe(1500);
 
     delivered = [];
-    await submitAddMcpServer({ name: 'n', command: 'c', args: [`${filler}a`] }, session);
+    await renderCard({ name: 'n', command: 'c', args: [`${filler}a`] }, session);
     expect(delivered).toHaveLength(0);
     expect(lastNotifyText()).toMatch(/1500 bytes/);
   });
 
   it('accepts a payload of exactly 16384 bytes and rejects one byte over', async () => {
-    // A secret-shaped filler renders as a tiny redaction placeholder, so the
-    // raw payload can hit its cap without tripping the 1500-byte card cap.
-    // Measure the fixed overhead with the bare prefix, then pad (ASCII:
-    // 1 char = 1 byte in the JSON encoding).
-    await submitAddMcpServer({ name: 'n', command: 'c', args: ['sk-'] }, session);
-    const base = Buffer.byteLength(JSON.stringify({ name: 'n', command: 'c', args: ['sk-'], env: {} }), 'utf8');
-    const filler = `sk-${'a'.repeat(16384 - base)}`;
+    // A secret-shaped path segment renders as a tiny redaction placeholder, so the raw payload can hit its cap
+    // without tripping the 1500-byte card cap. ASCII: 1 char = 1 byte in the JSON encoding.
+    const urlOf = (pad: number): string => `https://mcp.example.com/sk-${'a'.repeat(pad)}`;
+    const size = (pad: number): number =>
+      Buffer.byteLength(JSON.stringify({ name: 'n', type: 'http', url: urlOf(pad) }), 'utf8');
+    const pad = 16384 - size(0);
 
-    delivered = [];
-    await submitAddMcpServer({ name: 'n', command: 'c', args: [filler] }, session);
+    await submitAddMcpServer({ name: 'n', url: urlOf(pad) }, session);
     expect(delivered).toHaveLength(1);
 
     delivered = [];
-    await submitAddMcpServer({ name: 'n', command: 'c', args: [`${filler}a`] }, session);
+    await submitAddMcpServer({ name: 'n', url: urlOf(pad + 1) }, session);
     expect(delivered).toHaveLength(0);
     expect(lastNotifyText()).toMatch(/16384 bytes/);
   });
@@ -403,7 +377,7 @@ describe('add_mcp_server secret redaction', () => {
     const keyMatched = 'hunter2-secret-value'; // secret by env KEY (GITHUB_TOKEN)
     const valueMatched = 'sk-abc123def456'; // secret by VALUE prefix under an innocuous key
     const argSecret = 'ghp_deadbeefcafe1234'; // secret by VALUE prefix in args
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'safe',
         command: 'node',
@@ -486,7 +460,7 @@ describe('escapeInvisibles', () => {
 
 describe('add_mcp_server card through the chat-sdk bridge', () => {
   it('delivers CardText with the fence intact and escapes still visible', async () => {
-    await submitAddMcpServer(
+    await renderCard(
       {
         name: 'safe',
         command: 'node',

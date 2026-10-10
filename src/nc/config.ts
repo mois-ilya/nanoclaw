@@ -78,6 +78,17 @@ export const nc = {
   turnTimeoutMs: (owner: boolean) =>
     owner ? intSetting('NC_TURN_TIMEOUT_OWNER_MS', 30 * 60_000) : intSetting('NC_TURN_TIMEOUT_FRIEND_MS', 10 * 60_000),
   defaultLimitMicros: () => intSetting('NC_FRIEND_LIMIT_USD', 10) * USD,
+  /**
+   * Owner rolling-window spend cap (nanogate capWindowMinutes, per session token) so a runaway loop cannot drain the
+   * global cap. nanogate reserves the whole body at the cache-write rate, so the cap must leave room for one large
+   * Opus request (~$2.7 at 165k context) on top of the window's spend. 0 = no cap. Friends have none: their monthly
+   * limit already bounds them, and a small window cap would lock a long-context session.
+   */
+  ownerWindowCapMicros: (): number | null => {
+    const n = Number.parseInt(setting('NC_OWNER_WINDOW_CAP_USD'), 10);
+    const usd = Number.isFinite(n) && n >= 0 ? n : 15;
+    return usd > 0 ? usd * USD : null;
+  },
   globalCapMicros: () => intSetting('NC_GLOBAL_CAP_USD', 100) * USD,
   ownerConnectorSocks: () => setting('NC_OWNER_CONNECTOR_SOCKS'),
   ownerTailnetCidrs: () =>

@@ -39,6 +39,16 @@ describe('nanogate tenant policy', () => {
     expect((nanogatePolicy('friend', 'direct').egress as Record<string, unknown>).connectorTenant).toBeUndefined();
   });
 
+  it('friend connectorTenant follows the owner gate id passed by the caller (epoch-aware)', () => {
+    const eg = nanogatePolicy('friend', 'residential', `telegram:${OWNER}.e2`).egress as Record<string, unknown>;
+    expect(eg.connectorTenant).toBe(`telegram:${OWNER}.e2`);
+  });
+
+  it('owner gets a rolling-window spend cap ($15 by default), friends none', () => {
+    expect(nanogatePolicy('owner', 'direct').perTurnCapMicros).toBe(15_000_000);
+    expect(nanogatePolicy('friend', 'direct').perTurnCapMicros).toBeUndefined();
+  });
+
   it('the guest model is allowed for the owner even when it is not one of the preset models', () => {
     process.env.NC_MODEL_GUEST = 'claude-guest-x';
     process.env.NC_MODEL_FAST = 'claude-sonnet-5-5';

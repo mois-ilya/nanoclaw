@@ -103,9 +103,14 @@ async function main(): Promise<void> {
   // Build MCP servers config: nanoclaw built-in + any from container.json
   const mcpServers: Record<string, McpServerConfig> = {
     nanoclaw: {
+      // Hot tools (send_message, ask_user_question, …) must be callable without a ToolSearch round trip.
+      alwaysLoad: true,
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: {},
+      env:
+        config.disabledNanoclawTools.length > 0
+          ? { NANOCLAW_DISABLED_TOOLS: config.disabledNanoclawTools.join(',') }
+          : {},
     },
   };
 

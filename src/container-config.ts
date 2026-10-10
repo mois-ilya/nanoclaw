@@ -259,6 +259,33 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /** nanoclaw MCP tools the runner must not register for this group (see `disabledNanoclawToolsFor`). */
+  disabledNanoclawTools?: string[];
+}
+
+/** Product hook: extra nanoclaw MCP tools to hide per group (e.g. friends get no self-mod / create_agent). */
+export type DisabledToolsProvider = (agentGroupId: string) => Promise<readonly string[]> | readonly string[];
+let disabledToolsProvider: DisabledToolsProvider | null = null;
+export function setDisabledToolsProvider(fn: DisabledToolsProvider | null): void {
+  disabledToolsProvider = fn;
+}
+
+/**
+ * nanoclaw MCP tools the agent should not see: `install_packages` when the runtime cannot rebuild images
+ * (the guard would deny it anyway), plus whatever the product hook adds. Guards stay as defense in depth.
+ */
+export async function disabledNanoclawToolsFor(agentGroupId: string): Promise<string[]> {
+  const out = new Set<string>();
+  try {
+    // Lazy: drivers/index → provider-contracts → project-doc-compose → this module (import cycle).
+    const { getSessionDriver } = await import('./drivers/index.js');
+    if (!getSessionDriver().capabilities().imageBuild) out.add('install_packages');
+    // eslint-disable-next-line no-catch-all/no-catch-all -- no driver selected (unit suites): nothing to hide
+  } catch {
+    /* ignore */
+  }
+  for (const t of (await disabledToolsProvider?.(agentGroupId)) ?? []) out.add(t);
+  return [...out].sort();
 }
 
 /**
@@ -414,6 +441,8 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  const disabled = await disabledNanoclawToolsFor(agentGroupId);
+  if (disabled.length > 0) config.disabledNanoclawTools = disabled;
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

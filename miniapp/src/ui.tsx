@@ -209,7 +209,7 @@ export function useAction(toast: (m: string, k?: 'ok' | 'err') => void) {
       return true;
     } catch (e) {
       tg.haptic.error();
-      toast(e instanceof ApiError ? (e.code === 'forbidden' ? 'Это действие недоступно' : e.message) : 'Не получилось. Попробуй ещё раз', 'err');
+      toast(e instanceof ApiError ? e.message || (e.code === 'forbidden' ? 'Это действие недоступно' : 'Не получилось. Попробуй ещё раз') : 'Не получилось. Попробуй ещё раз', 'err');
       return false;
     } finally {
       setBusy(false);

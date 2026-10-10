@@ -309,9 +309,6 @@ describe('tenant scoping of data routes', () => {
 
   it('friend Tailscale keys are refused (no per-friend connector yet) and the card never claims «connecting»', async () => {
     const { token } = await login(FRIEND_A);
-    expect(
-      (await call(token, 'PUT', '/api/connections/tailscale/key', { key: 'tskey-auth-abcdef123456' })).status,
-    ).toBe(403);
     expect((await call(token, 'POST', '/api/connections/tailscale/reconnect')).status).toBe(403);
     expect(ng.putSecret).not.toHaveBeenCalled();
     const j = (await (await call(token, 'GET', '/api/connections')).json()) as {
@@ -321,33 +318,18 @@ describe('tenant scoping of data routes', () => {
     expect(j.connections[0].message).toContain('Скоро');
   });
 
-  it('revoking the owner connector is refused (server-managed)', async () => {
-    process.env.NC_OWNER_CONNECTOR_SOCKS = '10.91.2.2:1055';
+  it('the Home Assistant token feature is gone: routes 404, startup cleanup removes the file and an empty .secrets', async () => {
     const { token } = await login(OWNER);
-    expect((await call(token, 'DELETE', '/api/connections/tailscale')).status).toBe(409);
-    expect(ng.deleteConnector).not.toHaveBeenCalled();
-    delete process.env.NC_OWNER_CONNECTOR_SOCKS;
-  });
-
-  it('the Home Assistant token is owner-only, written to a 0600 file in the owner group, never read back', async () => {
-    const tok = 'a'.repeat(40);
-    const { token: ft } = await login(FRIEND_A);
-    expect((await call(ft, 'PUT', '/api/owner/secrets/ha-token', { token: tok })).status).toBe(403);
-    const { token } = await login(OWNER);
-    expect((await call(token, 'PUT', '/api/owner/secrets/ha-token', { token: 'short' })).status).toBe(400);
-    expect((await call(token, 'PUT', '/api/owner/secrets/ha-token', { token: tok })).status).toBe(204);
-    const file = path.join(TMP, 'groups', 'owner', '.secrets', 'ha_token');
-    expect(fs.readFileSync(file, 'utf8').trim()).toBe(tok);
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
-    expect(await (await call(token, 'GET', '/api/connections')).text()).not.toContain(tok);
-    const st = (await (await call(token, 'GET', '/api/connections')).json()) as { haToken: { savedAt: string } | null };
-    expect(Date.parse(st.haToken!.savedAt)).toBeGreaterThan(0);
+    expect((await call(token, 'PUT', '/api/owner/secrets/ha-token', { token: 'a'.repeat(40) })).status).toBe(404);
     expect(
-      ((await (await call(ft, 'GET', '/api/connections')).json()) as Record<string, unknown>).haToken,
+      ((await (await call(token, 'GET', '/api/connections')).json()) as Record<string, unknown>).haToken,
     ).toBeUndefined();
-    expect((await call(token, 'DELETE', '/api/owner/secrets/ha-token')).status).toBe(204);
-    expect(((await (await call(token, 'GET', '/api/connections')).json()) as { haToken: unknown }).haToken).toBeNull();
-    expect(fs.existsSync(file)).toBe(false);
+    const dir = path.join(TMP, 'groups', 'owner', '.secrets');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ha_token'), 'x\n');
+    const { removeLegacyHaTokens } = await import('../lifecycle.js');
+    removeLegacyHaTokens();
+    expect(fs.existsSync(dir)).toBe(false);
   });
 
   it('the Groq key is owner-only, host-only (DATA_DIR/secrets, 0600), verified, never read back', async () => {

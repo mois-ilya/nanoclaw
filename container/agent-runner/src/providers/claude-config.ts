@@ -6,6 +6,9 @@
  * exercises the real wiring, not a parallel description of it.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 import type { RuntimeInferenceInput } from '../provider-contracts/registry.js';
 import { shimCwd } from './cwd-shim.js';
 import type { McpServerConfig } from './types.js';
@@ -46,11 +49,16 @@ export const SDK_DISALLOWED_TOOLS = [
   'ReportFindings',
 ];
 
-// Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
-// from the registered `mcpServers` map so that any server added via
-// `add_mcp_server` (or wired in container.json directly) is reachable to the
-// agent — without this, the SDK's allowedTools filter silently drops every
-// MCP namespace not listed here.
+// Built-in tool allowlist for NanoClaw agent containers, passed to the SDK as
+// its `tools` option (the base set of built-ins; MCP tools are not affected).
+// Names are CC 2.1.280's: the subagent tool is still called `Task`; the native
+// build has no Glob/Grep unless listed here; `Monitor` streams background Bash
+// output. Deliberately absent: ListAgents (pairs with the blocked SendMessage),
+// Workflow and PushNotification (no headless host surface). `TeamCreate` /
+// `TeamDelete` / `TodoWrite` do not exist in every build; an unknown name is
+// ignored by the CLI. SDK_DISALLOWED_TOOLS and the PreToolUse hook stay as
+// defense in depth. NOTE: `allowedTools` is NOT a filter — under
+// bypassPermissions it only pre-approves; it is kept for the MCP patterns.
 export const TOOL_ALLOWLIST = [
   'Bash',
   'Read',
@@ -68,7 +76,39 @@ export const TOOL_ALLOWLIST = [
   'ToolSearch',
   'Skill',
   'NotebookEdit',
+  'Monitor',
 ];
+
+/** The SDK `tools` option: built-ins only, derived from TOOL_ALLOWLIST. A fresh array per call. */
+export function resolveClaudeBuiltinTools(): string[] {
+  return [...TOOL_ALLOWLIST];
+}
+
+/**
+ * Names of the skills actually installed for this agent: the entries of
+ * `<config dir>/skills` (host-selected container skills symlinked in,
+ * template-stamped dirs, agent-authored dirs). Passed as the SDK `skills`
+ * option so Claude Code's own bundled skills are not offered. A missing or
+ * unreadable directory yields [] (no skills at all).
+ */
+export function listInstalledSkills(configDir: string): string[] {
+  const dir = path.join(configDir, 'skills');
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((name) => {
+        if (name.startsWith('.')) return false;
+        try {
+          return fs.statSync(path.join(dir, name)).isDirectory(); // follows symlinks; a broken link is skipped
+        } catch {
+          return false;
+        }
+      })
+      .sort();
+  } catch {
+    return [];
+  }
+}
 
 // MCP server names are sanitized by the SDK when forming tool prefixes:
 // any character outside [A-Za-z0-9_-] becomes '_'. Mirror that here so our
@@ -124,8 +164,8 @@ export function resolveClaudeInference(
 
 /**
  * The SDK's stdio server config has no cwd field, so stdio servers with a
- * cwd are wrapped through the shell shim; the allowlist gains one pattern
- * per server so the SDK's tool filter doesn't drop their namespaces.
+ * cwd are wrapped through the shell shim; the pre-approval list gains one pattern
+ * per server (allowedTools pre-approves; it does not filter).
  */
 export function resolveClaudeMcpServers(
   input: Record<string, McpServerConfig>,

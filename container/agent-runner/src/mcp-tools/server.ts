@@ -28,8 +28,17 @@ function log(msg: string): void {
 const allTools: McpToolDefinition[] = [];
 const toolMap = new Map<string, McpToolDefinition>();
 
+/** Tools the host switched off for this group (container.json `disabledNanoclawTools`, passed via env). */
+const disabledTools = new Set(
+  (process.env.NANOCLAW_DISABLED_TOOLS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
 export function registerTools(tools: McpToolDefinition[]): void {
   for (const t of tools) {
+    if (disabledTools.has(t.tool.name)) continue;
     if (toolMap.has(t.tool.name)) {
       log(`Warning: tool "${t.tool.name}" already registered, skipping duplicate`);
       continue;

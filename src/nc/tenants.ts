@@ -90,7 +90,8 @@ export async function loadTenantMap(): Promise<void> {
 
 // ---------- nanogate tenant ----------
 
-export function nanogatePolicy(kind: 'owner' | 'friend', egress: Egress): TenantPolicy {
+/** `connectorTenant` is the owner's canonical gate id (epoch-aware); without it the epoch-1 id is assumed. */
+export function nanogatePolicy(kind: 'owner' | 'friend', egress: Egress, connectorTenant?: string): TenantPolicy {
   const m = nc.models();
   // The guest model is called with the owner's token (guest.ts), so it must be allowed for the owner.
   const models = [...new Set([m.fast, m.normal, m.deep, m.small, ...(kind === 'owner' ? [m.guest] : [])])];
@@ -107,20 +108,27 @@ export function nanogatePolicy(kind: 'owner' | 'friend', egress: Egress): Tenant
       ports: [443, 80],
       tailnet: false,
       // Friends reach the internet through the OWNER's home connector (plan v8 M5/A4); tailnet stays off for them.
-      ...(kind === 'friend' && egress === 'residential' && owner !== null ? { connectorTenant: userIdOf(owner) } : {}),
+      ...(kind === 'friend' && egress === 'residential' && owner !== null
+        ? { connectorTenant: connectorTenant ?? userIdOf(owner) }
+        : {}),
       // Home automation: an explicit owner allowlist, never "any tailnet address" (plan v8 M6).
       ...(kind === 'owner' ? { tailnet: allow.length > 0, tailnetAllow: allow } : {}),
     },
     maxConcurrentRequests: kind === 'owner' ? 4 : 2,
+    perTurnCapMicros: (kind === 'owner' ? nc.ownerWindowCapMicros() : null) ?? undefined,
   };
 }
 
-export function nanogateBody(t: Tenant, status: 'active' | 'paused' = 'active'): TenantUpsert {
+export function nanogateBody(
+  t: Tenant,
+  status: 'active' | 'paused' = 'active',
+  connectorTenant?: string,
+): TenantUpsert {
   const isOwnerTenant = t.tg_id === ownerTgId();
   return {
     kind: isOwnerTenant ? 'owner' : 'friend',
     status,
-    policy: nanogatePolicy(isOwnerTenant ? 'owner' : 'friend', t.egress),
+    policy: nanogatePolicy(isOwnerTenant ? 'owner' : 'friend', t.egress, connectorTenant),
     // Owner has no wall of their own: the global installation cap applies (plan §13.5).
     budgetLimitMicros: isOwnerTenant ? null : t.limit_usd_micros,
     periodTz: nc.defaultTz(),
@@ -130,14 +138,17 @@ export function nanogateBody(t: Tenant, status: 'active' | 'paused' = 'active'):
 export async function pushTenant(t: Tenant, status: 'active' | 'paused' = 'active'): Promise<void> {
   // A friend routed «через дом» references the owner's connector tenant, which nanogate must already know.
   const owner = ownerTgId();
+  let connectorTenant: string | undefined;
   if (t.egress === 'residential' && owner !== null && t.tg_id !== owner) {
     const o = await getTenantByTg(owner);
-    if (o)
+    if (o) {
+      connectorTenant = gateIdOf(o);
       await nanogateAdmin
-        .putTenant(gateIdOf(o), nanogateBody(o, 'active'))
+        .putTenant(connectorTenant, nanogateBody(o, 'active'))
         .catch((err) => log.warn('nc: owner tenant pre-push failed', { err }));
+    }
   }
-  await nanogateAdmin.putTenant(gateIdOf(t), nanogateBody(t, status));
+  await nanogateAdmin.putTenant(gateIdOf(t), nanogateBody(t, status, connectorTenant));
 }
 
 /** Self-heal: nanogate answered tenant_not_found for a group we know. */

@@ -21,6 +21,8 @@ export interface RunnerConfig {
   model?: string;
   effort?: string;
   speed?: ProviderSpeed;
+  /** nanoclaw MCP tools the host switched off for this group. */
+  disabledNanoclawTools: string[];
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -58,6 +60,9 @@ export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig 
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     speed: readSpeed(raw),
+    disabledNanoclawTools: Array.isArray(raw.disabledNanoclawTools)
+      ? raw.disabledNanoclawTools.filter((t): t is string => typeof t === 'string')
+      : [],
   };
 }
 

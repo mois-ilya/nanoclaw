@@ -99,93 +99,62 @@ const SECRET_QUERY_KEY_RE =
 /** camelCase → snake_case before matching, so `authToken` hits the word list. */
 const CAMEL_SPLIT_RE = /([a-z0-9])([A-Z])/g;
 
-type ParsedMcpServer = { type: 'http'; url: string } | { command: string; args: string[]; env: Record<string, string> };
+type ParsedMcpServer = { type: 'http'; url: string };
 
 /**
- * Names and env keys reach provider config writers with structural syntax —
+ * Names reach provider config writers with structural syntax —
  * e.g. mcpAllowPattern (providers/claude.ts) collapses non-[A-Za-z0-9_-] to
  * `_`, so unvalidated names could collide — hence a charset allowlist at
  * every entry point.
  */
 const MCP_SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
- * Mirrors the host's parseMcpServerConfig (src/container-config.ts) — the
+ * Mirrors the host's validateAddMcpServer (src/modules/self-mod/request.ts) — the
  * host re-validates on receipt, but this copy answers the agent instantly.
  * No shared modules across the host/container boundary; keep the two in sync.
- * One deliberate gap: the host parses a cwd field, but no self-mod tool param
- * exposes it (plugin stamping and raw approval payloads are its only
- * carriers), so this copy has none.
+ * For now only remote HTTPS MCP servers that need no secrets are accepted:
+ * no stdio commands, no env, no headers.
  */
 function parseMcpServerInput(args: Record<string, unknown>): { config: ParsedMcpServer } | { error: string } {
-  const command = typeof args.command === 'string' && args.command.trim() ? args.command : undefined;
+  if (args.command !== undefined || args.args !== undefined || args.env !== undefined || args.headers !== undefined) {
+    return {
+      error:
+        'only remote HTTPS MCP servers are supported for now: pass just `name` and `url` (no command, args, env or headers)',
+    };
+  }
   const url = typeof args.url === 'string' && args.url.trim() ? args.url.trim() : undefined;
-
-  if (url !== undefined) {
-    if (command !== undefined) return { error: 'Provide exactly one of command or url' };
-    if (args.args !== undefined || args.env !== undefined) return { error: 'args and env are only valid with command' };
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return { error: 'url must be a valid HTTP(S) URL' };
-    }
-    const loopback = ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
-      return { error: 'url must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)' };
-    }
-    if (parsed.username || parsed.password || parsed.hash) {
-      return { error: 'url must not contain credentials or fragments; use the credential gateway for authentication' };
-    }
-    for (const key of parsed.searchParams.keys()) {
-      if (SECRET_QUERY_KEY_RE.test(key.replace(CAMEL_SPLIT_RE, '$1_$2'))) {
-        return {
-          error: `url query parameter "${key}" looks like a credential; use the credential gateway for authentication`,
-        };
-      }
-    }
-    return { config: { type: 'http', url } };
+  if (url === undefined) return { error: 'url is required (an HTTPS Streamable HTTP MCP endpoint)' };
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { error: 'url must be a valid HTTPS URL' };
   }
-  if (command === undefined) return { error: 'Provide exactly one of command or url' };
-
-  const commandArgs = args.args ?? [];
-  if (!Array.isArray(commandArgs) || !commandArgs.every((arg) => typeof arg === 'string')) {
-    return { error: 'args must be an array of strings' };
+  if (parsed.protocol !== 'https:') return { error: 'url must use HTTPS' };
+  if (parsed.username || parsed.password || parsed.hash) {
+    return { error: 'url must not contain credentials or fragments; secrets are not supported yet' };
   }
-  const rawEnv = args.env ?? {};
-  if (typeof rawEnv !== 'object' || rawEnv === null || Array.isArray(rawEnv)) {
-    return { error: 'env must be an object with string values' };
-  }
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(rawEnv)) {
-    if (typeof value !== 'string') return { error: 'env must be an object with string values' };
-    if (!ENV_KEY_RE.test(key)) {
-      return { error: `env key ${JSON.stringify(key)} must be a valid environment variable name` };
+  for (const key of parsed.searchParams.keys()) {
+    if (SECRET_QUERY_KEY_RE.test(key.replace(CAMEL_SPLIT_RE, '$1_$2'))) {
+      return { error: `url query parameter "${key}" looks like a credential; secrets are not supported yet` };
     }
-    env[key] = value;
   }
-  return { config: { command, args: commandArgs, env } };
+  return { config: { type: 'http', url } };
 }
 
 export const addMcpServer: McpToolDefinition = {
   tool: {
     name: 'add_mcp_server',
     description:
-      'Wire an EXISTING third-party MCP server into YOUR per-agent runtime config. Provide either the local `command` + optional `args`/`env`, or its remote Streamable HTTP `url` (HTTPS; plain HTTP only for localhost / host.docker.internal). Requires admin approval; fire-and-forget.',
+      'Wire an EXISTING remote MCP server (Streamable HTTP, HTTPS `url`, no secrets or headers) into YOUR per-agent runtime config. Requires owner approval; fire-and-forget.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         name: { type: 'string', description: 'MCP server name (unique identifier)' },
-        command: { type: 'string', description: 'Command to run the MCP server' },
-        url: {
-          type: 'string',
-          description: 'Streamable HTTP MCP endpoint (HTTPS; plain HTTP only for localhost / host.docker.internal)',
-        },
-        args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
-        env: { type: 'object', description: 'Environment variables for the server' },
+        url: { type: 'string', description: 'Streamable HTTP MCP endpoint (HTTPS only)' },
       },
-      required: ['name'],
+      required: ['name', 'url'],
     },
   },
   async handler(args) {
@@ -208,7 +177,7 @@ export const addMcpServer: McpToolDefinition = {
       }),
     });
 
-    log(`add_mcp_server: ${requestId} → "${name}" (${'url' in parsed.config ? 'HTTP' : parsed.config.command})`);
+    log(`add_mcp_server: ${requestId} → "${name}" (HTTP)`);
     return ok(`MCP server request submitted. You will be notified when admin approves or rejects.`);
   },
 };

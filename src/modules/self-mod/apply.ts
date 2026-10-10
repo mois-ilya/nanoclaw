@@ -126,6 +126,10 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
   try {
     validateMcpServerName(name);
     serverConfig = parseMcpServerConfig(payload);
+    // Cards raised before the https-only rule (request.ts) must not install a stdio server when approved later.
+    if (!('url' in serverConfig) || !serverConfig.url.startsWith('https://') || serverConfig.headers) {
+      throw new Error('only remote HTTPS servers without headers are supported');
+    }
     // eslint-disable-next-line no-catch-all/no-catch-all -- approval payload validation must fail closed
   } catch (err) {
     await notifyAgent(

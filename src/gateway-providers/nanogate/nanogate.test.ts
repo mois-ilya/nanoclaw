@@ -216,6 +216,26 @@ describe('ensure', () => {
   });
 });
 
+describe('agent env feature toggles', () => {
+  const token = 'ngs_abcdefghijklmnop0123';
+  afterEach(() => {
+    delete process.env.NC_TOOL_SEARCH;
+    delete process.env.NC_PROMPT_CACHE_1H;
+  });
+
+  it('turns tool search and the 1h prompt cache on by default', () => {
+    expect(agentEnv(token)).toMatchObject({ ENABLE_TOOL_SEARCH: 'true', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
+  });
+
+  it('NC_TOOL_SEARCH=0 and NC_PROMPT_CACHE_1H=0 switch them off independently', () => {
+    process.env.NC_TOOL_SEARCH = '0';
+    expect(agentEnv(token)).not.toHaveProperty('ENABLE_TOOL_SEARCH');
+    expect(agentEnv(token).CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h');
+    process.env.NC_PROMPT_CACHE_1H = 'false';
+    expect(agentEnv(token)).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL');
+  });
+});
+
 describe('release', () => {
   it('revokes on session-ended and only notifies on host-detached', async () => {
     const lease = await nanogateProvider.sessions.ensure(input('create'), signal);

@@ -13,6 +13,7 @@ import { ensureContainerConfig } from '../db/container-configs.js';
 import { DEFAULT_PROJECT_DOC, composeGroupProjectDoc, setPlatformLayerProvider } from '../project-doc-compose.js';
 import { stageGroupPersona } from '../group-persona.js';
 import { splitSections } from './miniapp/api.js';
+import { disabledNanoclawToolsFor } from '../container-config.js';
 import { installPlatformLayer } from './platform.js';
 import { putPrefs, insertTenantIfAbsent, updateTenant } from './store.js';
 import { friendPersona, ownerPersona } from './templates.js';
@@ -98,5 +99,29 @@ describe('host-owned platform layer (L0)', () => {
     const persona = splitSections(await composed('ag-f')).find((s) => s.name === 'Persona')!;
     expect(persona.body).toContain('# О пользователе');
     expect(persona.body).toContain('Имя: Маша');
+  });
+
+  it('a friend gets no self-mod, agents or cli module docs; the owner keeps them (task docs stay for both)', async () => {
+    const friend = await composed('ag-f');
+    const owner = await composed('ag-o');
+    for (const m of ['self-mod', 'agents', 'cli']) {
+      expect(friend).not.toContain(`# NanoClaw Module: ${m}`);
+      expect(owner).toContain(`# NanoClaw Module: ${m}`);
+    }
+    expect(friend).toContain('# NanoClaw Module: scheduling');
+    expect(friend.length).toBeLessThan(owner.length);
+    // The composed prompt never promises what the platform cannot do.
+    for (const doc of [friend, owner]) {
+      expect(doc).not.toContain('gateway-managed');
+      expect(doc).not.toContain('groups connect');
+      expect(doc).not.toContain('ha_token');
+      expect(doc).not.toContain('install_packages`** —');
+    }
+  });
+
+  it('friends have add_mcp_server and create_agent switched off in container.json; the owner keeps them', async () => {
+    expect(await disabledNanoclawToolsFor('ag-f')).toEqual(expect.arrayContaining(['add_mcp_server', 'create_agent']));
+    expect(await disabledNanoclawToolsFor('ag-o')).not.toContain('add_mcp_server');
+    expect(await disabledNanoclawToolsFor('ag-o')).not.toContain('create_agent');
   });
 });

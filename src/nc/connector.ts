@@ -6,6 +6,7 @@
 import { log } from '../log.js';
 import { nanogateAdmin } from '../gateway-providers/nanogate/index.js';
 import { nc, ownerTgId, userIdOf } from './config.js';
+import { gateIdOf, getTenantByTg } from './store.js';
 
 export function ownerConnectorConfigured(): boolean {
   return nc.ownerConnectorSocks() !== '';
@@ -42,7 +43,9 @@ export async function syncOwnerConnector(): Promise<boolean> {
   if (owner === null || !socksAddr) return false;
   try {
     const status = await ownerConnectorStatus(true);
-    await nanogateAdmin.putConnector(userIdOf(owner), {
+    // The connector is keyed by the owner's canonical gate id: an epoch bump must not orphan it.
+    const o = await getTenantByTg(owner);
+    await nanogateAdmin.putConnector(o ? gateIdOf(o) : userIdOf(owner), {
       socksAddr,
       status: status === 'ok' ? 'up' : 'down',
       routes: { cidrs: nc.ownerTailnetCidrs(), exitNode: ownerHasExitNode() },

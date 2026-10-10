@@ -75,8 +75,6 @@ export async function requestInstallPackagesHold(content: Record<string, unknown
   });
 }
 
-const MAX_MCP_ARGS = 32;
-const MAX_MCP_ENV_VARS = 32;
 /** Byte cap on the rendered approval card body (precedent: GATE_CARD_BODY_MAX in agent-route.ts). */
 const MCP_APPROVAL_CARD_MAX_BYTES = 1500;
 /**
@@ -140,6 +138,24 @@ export async function validateAddMcpServer(content: Record<string, unknown>, ses
     return false;
   }
 
+  // For now an agent may only request a remote HTTPS MCP server that needs no secrets: no stdio command,
+  // no env, no headers. (Operator-side `ncl` and stamped plugins keep their wider surface.)
+  if (serverConfig.type !== 'http') {
+    await notifyAgent(
+      session,
+      'add_mcp_server failed: only remote HTTPS MCP servers are supported for now (no command, args or env).',
+    );
+    return false;
+  }
+  if (serverConfig.headers !== undefined) {
+    await notifyAgent(session, 'add_mcp_server failed: headers are not supported yet (secrets are not available).');
+    return false;
+  }
+  if (new URL(serverConfig.url).protocol !== 'https:') {
+    await notifyAgent(session, 'add_mcp_server failed: url must use HTTPS.');
+    return false;
+  }
+
   // Plugin-owned servers are template content: reject before an approval round
   // is spent — the only sanctioned change path is updating the plugin and
   // re-stamping (apply.ts re-checks in case an approval races a restamp).
@@ -155,26 +171,6 @@ export async function validateAddMcpServer(content: Record<string, unknown>, ses
     return false;
   }
 
-  // cwd only means something for plugin-shipped servers (the runtime resolves
-  // it against the plugin root, which approval-added servers never have — it
-  // would be silently dropped). Rejecting keeps the card honest: an approver
-  // must never sign a working directory that won't take effect.
-  if (serverConfig.type !== 'http' && serverConfig.cwd !== undefined) {
-    await notifyAgent(session, 'add_mcp_server failed: cwd is only supported for plugin-shipped servers.');
-    return false;
-  }
-
-  const args = serverConfig.type === 'http' ? [] : (serverConfig.args ?? []);
-  const env = serverConfig.type === 'http' ? {} : (serverConfig.env ?? {});
-
-  if (args.length > MAX_MCP_ARGS) {
-    await notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ARGS} args per server.`);
-    return false;
-  }
-  if (Object.keys(env).length > MAX_MCP_ENV_VARS) {
-    await notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ENV_VARS} env vars per server.`);
-    return false;
-  }
   if (Buffer.byteLength(JSON.stringify({ name: serverName, ...serverConfig }), 'utf8') > MCP_PAYLOAD_MAX_BYTES) {
     await notifyAgent(session, `add_mcp_server failed: payload exceeds ${MCP_PAYLOAD_MAX_BYTES} bytes.`);
     return false;

@@ -256,7 +256,7 @@ describe('host/container validation parity', () => {
     const read = (p: string): string => fs.readFileSync(path.join(process.cwd(), p), 'utf-8');
     const host = read('src/container-config.ts');
     const container = read('container/agent-runner/src/mcp-tools/self-mod.ts');
-    for (const name of ['SECRET_QUERY_KEY_RE', 'CAMEL_SPLIT_RE', 'MCP_SERVER_NAME_RE', 'ENV_KEY_RE']) {
+    for (const name of ['SECRET_QUERY_KEY_RE', 'CAMEL_SPLIT_RE', 'MCP_SERVER_NAME_RE']) {
       const literal = (src: string): string | undefined =>
         src
           .match(new RegExp(`const ${name} =\\s*([^;]+);`))?.[1]

@@ -255,3 +255,39 @@ export async function purgeDueTrash(now = Date.now()): Promise<number> {
   }
   return n;
 }
+
+/**
+ * The Home Assistant token feature is gone: remove any leftover `ha_token` in each group's `.secrets`, and the
+ * `.secrets` dir when that leaves it empty. lstat/unlink/rmdir only, so a symlink planted in an
+ * agent-writable folder is never followed.
+ */
+export function removeLegacyHaTokens(): void {
+  let groups: fs.Dirent[];
+  try {
+    groups = fs.readdirSync(GROUPS_DIR, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const g of groups) {
+    if (!g.isDirectory()) continue; // Dirent from readdir does not follow symlinks
+    const dir = path.join(GROUPS_DIR, g.name, '.secrets');
+    try {
+      if (!fs.lstatSync(dir).isDirectory()) continue;
+      const file = path.join(dir, 'ha_token');
+      try {
+        fs.lstatSync(file);
+        fs.unlinkSync(file);
+        log.info('nc: removed legacy Home Assistant token', { group: g.name });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      if (fs.readdirSync(dir).length === 0) {
+        fs.rmdirSync(dir);
+        log.info('nc: removed empty .secrets dir', { group: g.name });
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+        log.warn('nc: legacy ha_token cleanup failed', { group: g.name, err });
+    }
+  }
+}

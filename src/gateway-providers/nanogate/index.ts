@@ -196,7 +196,18 @@ export function agentEnv(token: string): Record<string, string> {
     // WebFetch and Explore subagents call the small model; pin it to one nanogate's default policy allows.
     ANTHROPIC_DEFAULT_HAIKU_MODEL: smallModel(),
     ANTHROPIC_SMALL_FAST_MODEL: smallModel(),
+    // Claude Code switches MCP tool search off for a non-first-party base URL unless this is set. Needs
+    // `advanced-tool-use-2025-11-20` in nanogate's defaultBetas. Kill switch: NC_TOOL_SEARCH=0.
+    ...(enabled('NC_TOOL_SEARCH') ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
+    // 1-hour prompt cache for the main conversation (needs `extended-cache-ttl-2025-04-11`; writes bill at
+    // the 1h rate). Kill switch: NC_PROMPT_CACHE_1H=0.
+    ...(enabled('NC_PROMPT_CACHE_1H') ? { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } : {}),
   };
+}
+
+/** A feature toggle that is on unless set to 0/false/off/no. */
+function enabled(key: string): boolean {
+  return !/^(0|false|off|no)$/i.test(setting(key));
 }
 
 /** Follows NC_MODEL_SMALL (same source as the nanogate policy in src/nc/tenants.ts). */

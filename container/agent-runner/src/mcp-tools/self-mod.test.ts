@@ -20,23 +20,23 @@ describe('add_mcp_server', () => {
     });
   });
 
-  it('accepts non-secret query params and loopback HTTP', async () => {
+  it('accepts non-secret query params', async () => {
     for (const url of [
       'https://mcp.datadoghq.com/v1/mcp?toolsets=apm,llmobs',
       'https://mcp.example.com/mcp?author=jane',
-      'http://localhost:8080/mcp',
-      'http://host.docker.internal:8080/mcp',
     ]) {
       const result = await addMcpServer.handler({ name: 'remote', url });
       expect(result.isError).not.toBe(true);
     }
-    expect(getUndeliveredMessages()).toHaveLength(4);
+    expect(getUndeliveredMessages()).toHaveLength(2);
   });
 
   it('rejects insecure or credential-bearing URLs before requesting approval', async () => {
     for (const url of [
       'http://mcp.example.com/mcp',
       'http://localhost.evil.com/mcp',
+      'http://localhost:8080/mcp',
+      'http://host.docker.internal:8080/mcp',
       'https://mcp.example.com/mcp?api_key=secret',
       'https://mcp.example.com/mcp?authorization=x',
       'https://mcp.example.com/mcp?authToken=x',
@@ -48,11 +48,10 @@ describe('add_mcp_server', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('rejects names and env keys that could carry config syntax', async () => {
+  it('rejects names that could carry config syntax', async () => {
     for (const args of [
       { name: 'docs] [mcp_servers.evil]', url: 'https://mcp.example.com/mcp' },
       { name: 'x'.repeat(65), url: 'https://mcp.example.com/mcp' },
-      { name: 'ok', command: 'node', env: { 'BAD KEY': 'v' } },
     ]) {
       const result = await addMcpServer.handler(args);
       expect(result.isError).toBe(true);
@@ -60,9 +59,13 @@ describe('add_mcp_server', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('rejects command and url together, and neither', async () => {
+  it('rejects stdio commands, env and headers, and a missing url', async () => {
     for (const args of [
+      { name: 'remote', command: 'server' },
       { name: 'remote', command: 'server', url: 'https://mcp.example.com/mcp' },
+      { name: 'remote', url: 'https://mcp.example.com/mcp', env: { FOO: 'bar' } },
+      { name: 'remote', url: 'https://mcp.example.com/mcp', args: ['x'] },
+      { name: 'remote', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'x' } },
       { name: 'remote' },
     ]) {
       const result = await addMcpServer.handler(args);

@@ -463,6 +463,7 @@ registerResource({
     },
     'config add-mcp-server': {
       access: 'approval',
+      hostOnly: true,
       description:
         'Add an MCP server to a group. Requires `ncl groups restart` to take effect. ' +
         'Use --id <group-id> --name <server-name> with either --command <cmd> [--args <json-array>] [--env <json-object>] ' +
@@ -499,6 +500,7 @@ registerResource({
     },
     'config remove-mcp-server': {
       access: 'approval',
+      hostOnly: true,
       description:
         'Remove an MCP server from a group. Requires `ncl groups restart` to take effect. Use --id <group-id> --name <server-name>.',
       handler: async (args) => {

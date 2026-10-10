@@ -1,36 +1,13 @@
-## Installing packages & tools
+## MCP servers (`add_mcp_server`)
 
-To install packages that persist, use the self-modification tools:
-
-**`install_packages`** — request system (apt) or global npm packages. Requires admin approval.
-
-Example flow:
-```
-install_packages({ apt: ["ffmpeg"], npm: ["@xenova/transformers"], reason: "Audio transcription" })
-# → Admin gets an approval card → approves
-```
-
-**When to use this vs workspace `pnpm install`:**
-- `pnpm install` if you only need it temporarily to do one task. Will not be available in subsequent truns.
-- `install_packages` persists for all future turns. Use especially if the user specifically asks you to add a capability
-
-### MCP servers (`add_mcp_server`)
-
-Use **`add_mcp_server`** to add an MCP server to your configuration. Browse available servers at https://mcp.so — it's a curated directory of high-quality MCP servers. Most Node.js servers run via `pnpm dlx`, e.g.:
-
-```
-add_mcp_server({ name: "memory", command: "pnpm", args: ["dlx", "@modelcontextprotocol/server-memory"] })
-```
-
-Remote Streamable HTTP servers use a URL instead of a command:
+Use **`add_mcp_server`** to connect an existing remote MCP server to your configuration. The owner approves each request on a card.
 
 ```
 add_mcp_server({ name: "remote", url: "https://example.com/mcp" })
 ```
 
-Use HTTPS; plain HTTP is allowed only for `localhost` and
-`host.docker.internal` (an MCP server running on the host machine). URLs with
-credentials, fragments, or credential-looking query parameters are rejected;
-authentication belongs in the configured credential gateway.
+Only a remote Streamable HTTP server with an **HTTPS** `url` that needs **no secrets** is supported. Local commands (`command`, `args`, `env`), headers, and URLs carrying credentials or tokens are rejected.
 
-Do not ask the user to give you credentials or tell them how to create credentials (OAuth, API keys, etc.) — NEVER fabricate credential setup instructions. Credentials are handled by the configured gateway. Use `"gateway-managed"` as the placeholder value for credential env vars or config fields. Follow the installed gateway skill for its connection and recovery flow.
+Secrets are not supported yet (a future Mini App feature). Do not ask the user for API keys or tokens, and do not invent credential setup steps: if a server needs a key, say that it cannot be connected yet.
+
+Packages cannot be installed on this runtime; work with the tools already in the image.

@@ -170,6 +170,17 @@ export function setPlatformLayerProvider(fn: PlatformLayerProvider | null): void
   platformLayerProvider = fn;
 }
 
+/**
+ * nanoclaw-fork: module instruction docs a group must not receive (e.g. friends cannot self-modify or create
+ * agents, and their CLI is limited to tasks/me). Returns module names, as in `<name>.instructions.md`.
+ */
+export type ModuleDocExcluder = (group: AgentGroup) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
+let moduleDocExcluder: ModuleDocExcluder | null = null;
+
+export function setModuleDocExcluder(fn: ModuleDocExcluder | null): void {
+  moduleDocExcluder = fn;
+}
+
 export const PLATFORM_SECTION_NAME = 'NanoClaw Platform';
 
 /**
@@ -236,6 +247,14 @@ export async function composeGroupProjectDoc(
   // Module instructions — every MCP/CLI module shipping a sibling
   // `<name>.instructions.md`, describing how to use that module's tools.
   const cliDisabled = configRow?.cli_scope === 'disabled';
+  let excludedModules: ReadonlySet<string> = new Set();
+  if (moduleDocExcluder) {
+    try {
+      excludedModules = await moduleDocExcluder(group);
+    } catch (err) {
+      log.warn('Module doc excluder failed; composing every module doc', { group: group.name, err });
+    }
+  }
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir).sort()) {
@@ -243,6 +262,7 @@ export async function composeGroupProjectDoc(
       if (!match) continue;
       const moduleName = match[1];
       if (cliDisabled && NCL_DEPENDENT_MODULES.has(moduleName)) continue;
+      if (excludedModules.has(moduleName)) continue;
       push(`NanoClaw Module: ${moduleName}`, fs.readFileSync(path.join(mcpToolsHostDir, entry), 'utf-8'), true);
     }
   }

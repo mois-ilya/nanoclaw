@@ -3,7 +3,7 @@ import { parseCidr, parseIp, CidrSet } from '../src/cidr.js';
 import { periodBounds } from '../src/budget.js';
 import { SseUsageParser, normalizeUsage } from '../src/sse-usage.js';
 import { costMicros, reserveMicros, serverToolCapMicros, validatePrices } from '../src/pricing.js';
-import { normalizePolicy, tailnetAllowed } from '../src/policy.js';
+import { checkRequest, isRejection, normalizePolicy, tailnetAllowed } from '../src/policy.js';
 import { parseAuthority } from '../src/connect-proxy.js';
 import { hashToken, mintToken, encrypt, decrypt } from '../src/tokens.js';
 import { validateConfig, readApiKey } from '../src/config.js';
@@ -182,5 +182,56 @@ describe('prompt-length price tiers', () => {
     const p = validatePrices(file);
     for (const m of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']) expect(p.models[m]).toBeDefined();
     expect(p.serverTools.web_search).toBe(0.01);
+  });
+});
+
+describe('Claude Code tool search and 1h cache request shape', () => {
+  // Captured from Claude Code 2.1.280 with ENABLE_TOOL_SEARCH=true + CLAUDE_CODE_PROMPT_CACHE_TTL=1h against a
+  // non-first-party ANTHROPIC_BASE_URL: ToolSearch is a custom tool (no `type`), deferred tools carry
+  // defer_loading:true, and the ToolSearch result is a tool_result holding tool_reference blocks.
+  const cfg = validateConfig({ anthropicKeyFile: '/k', encryptionKeyFile: '/e', stateDir: '/s', prices: PRICES });
+  const policy = normalizePolicy({ models: ['m-1'] });
+  const cc = { type: 'ephemeral', ttl: '1h' };
+  const body = () => ({
+    model: 'm-1',
+    max_tokens: 1024,
+    system: [{ type: 'text', text: 'You are a Claude agent.', cache_control: cc }],
+    tools: [
+      { name: 'Bash', description: 'd', input_schema: { type: 'object', properties: {} } },
+      { name: 'ToolSearch', description: 'd', input_schema: { type: 'object', properties: {} } },
+      { name: 'mcp__ext__ping', description: 'd', input_schema: { type: 'object', properties: {} }, defer_loading: true },
+    ],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'ToolSearch', input: { query: 'select:mcp__ext__ping' }, cache_control: cc }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'tool_reference', tool_name: 'mcp__ext__ping' }] },
+          { type: 'text', text: 'Tool loaded.' },
+        ],
+      },
+    ],
+  });
+  const betas = 'claude-code-20250219,advanced-tool-use-2025-11-20,extended-cache-ttl-2025-04-11,mid-conversation-system-2026-04-07';
+
+  it('passes the request unchanged and keeps the tool-search and 1h-cache betas', () => {
+    const r = checkRequest(policy, PRICES, cfg.defaultBetas, body(), betas, true);
+    expect(isRejection(r)).toBe(false);
+    if (isRejection(r)) return;
+    expect(r.body.tools).toEqual(body().tools);
+    expect(r.body.messages).toEqual(body().messages);
+    expect(r.betas).toBe('claude-code-20250219,advanced-tool-use-2025-11-20,extended-cache-ttl-2025-04-11');
+    expect(r.droppedBetas).toEqual(['mid-conversation-system-2026-04-07']);
+  });
+
+  it('also keeps the fallback tool-search beta name', () => {
+    const r = checkRequest(policy, PRICES, cfg.defaultBetas, body(), 'tool-search-tool-2025-10-19', true);
+    expect(isRejection(r) ? null : r.betas).toBe('tool-search-tool-2025-10-19');
+  });
+
+  it('prices 1h cache writes at the 1h rate, not the 5m rate', () => {
+    const u = normalizeUsage({ input_tokens: 0, output_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000 } });
+    expect(costMicros(PRICES as never, 'm-1', u)).toBe(1000 * 6);
   });
 });

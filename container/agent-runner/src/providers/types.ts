@@ -137,8 +137,10 @@ export type McpServerConfig =
        * (cwd-shim.ts) or drop it — never launch in the wrong directory.
        */
       cwd?: string;
+      /** Claude: keep this server's tools in the prompt instead of deferring them behind tool search. */
+      alwaysLoad?: boolean;
     }
-  | { type: 'http'; url: string; headers?: Record<string, string> };
+  | { type: 'http'; url: string; headers?: Record<string, string>; alwaysLoad?: boolean };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

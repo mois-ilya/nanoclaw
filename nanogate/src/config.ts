@@ -121,6 +121,13 @@ export function validateConfig(raw: unknown): Config {
       'interleaved-thinking-2025-05-14',
       'fine-grained-tool-streaming-2025-05-14',
       'context-management-2025-06-27',
+      // MCP tool search (ENABLE_TOOL_SEARCH): Claude Code 2.1.280 sends advanced-tool-use-2025-11-20 on the
+      // first-party-shaped path (tool-search-tool-2025-10-19 is its fallback name). Deferred tools are custom
+      // tools with defer_loading:true; ToolSearch is a custom tool; no typed server tool, so nothing is priced.
+      'advanced-tool-use-2025-11-20',
+      'tool-search-tool-2025-10-19',
+      // 1-hour prompt cache TTL (CLAUDE_CODE_PROMPT_CACHE_TTL=1h). Writes are billed at cacheWrite1h.
+      'extended-cache-ttl-2025-04-11',
     ]),
     disableBuiltinDeny: strArr(r.disableBuiltinDeny, 'disableBuiltinDeny', []),
     socksTimeoutMs: int(r.socksTimeoutMs, 'socksTimeoutMs', 10_000),

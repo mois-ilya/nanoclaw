@@ -10,6 +10,8 @@ import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registr
 // contract — registration is two-step so it compiles on a core without one.
 import {
   SDK_DISALLOWED_TOOLS,
+  listInstalledSkills,
+  resolveClaudeBuiltinTools,
   type resolveClaudeExecutionPolicy,
   type resolveClaudeInference,
   type resolveClaudeMcpServers,
@@ -17,7 +19,7 @@ import {
 } from './claude-config.js';
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
-import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
+import { archiveClaudeTranscript, claudeConfigDirectory, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
 // nanoclaw-fork: typed turn telemetry (progress steps from tool hooks)
 import { turnTelemetry } from '../turn-telemetry.js';
@@ -306,8 +308,18 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
           : undefined,
+        // Built-ins are an explicit list (TOOL_ALLOWLIST). allowedTools only
+        // pre-approves (it is not a filter); disallowedTools + the PreToolUse
+        // block stay as defense in depth.
+        tools: resolveClaudeBuiltinTools(),
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
+        // Only the skills present in ~/.claude/skills right now (host-selected,
+        // template-stamped, agent-authored) — Claude Code's bundled skills are
+        // excluded. Read per query so a skill the agent just wrote is offered.
+        skills: listInstalledSkills(claudeConfigDirectory()),
+        // Ignore .mcp.json / settings MCP: only the servers nanoclaw passes.
+        strictMcpConfig: true,
         // The SDK emits `assistant` only per completed content block, so a long
         // block is silent and the host sweep kills the container mid-generation.
         // Streaming deltas are the liveness signal for that window; translateEvents

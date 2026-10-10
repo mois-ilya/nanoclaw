@@ -192,7 +192,6 @@ export function createMockFetch(search: string): FetchLike {
     }
     if (p === '/api/usage') return json(usage(u.searchParams.get('days') === '30' ? 30 : 14));
     if (p === '/api/connections') return json({ connections: [tailscale], egress });
-    if (p === '/api/connections/tailscale/key') { tailscale = { id: 'tailscale', status: 'connecting', keySavedAt: iso(Date.now()) }; setTimeout(() => { tailscale = { ...tailscale, status: 'connected', node: 'nanoclaw-masha', exitNode: 'home-moscow', exitNodeOnline: true, lastCheckAt: iso(Date.now()) }; }, 1500); return new Response(null, { status: 204 }); }
     if (p === '/api/connections/tailscale/reconnect') { tailscale = { ...tailscale, status: 'connected', lastCheckAt: iso(Date.now()), message: undefined }; return new Response(null, { status: 204 }); }
     if (p === '/api/connections/tailscale' && method === 'DELETE') { tailscale = { id: 'tailscale', status: 'not_connected' }; return new Response(null, { status: 204 }); }
     if (p === '/api/egress') { egress = { ...egress, route: body.route }; return json(egress); }

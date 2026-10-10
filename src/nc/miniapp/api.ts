@@ -293,7 +293,7 @@ const home: Handler = async ({ tenant, isOwner }) => {
     view.attention = {
       pendingRequests: (await listPendingRequests()).length,
       friendsOverBudget: over,
-      connectorIssues: ownerConnectorConfigured() && !(await nanogateAdmin.healthz().catch(() => false)) ? 1 : 0,
+      connectorIssues: ownerConnectorConfigured() && (await ownerConnectorStatus()) !== 'ok' ? 1 : 0,
     };
   }
   return ok(view);
@@ -713,20 +713,10 @@ const connections: Handler = async ({ tenant, isOwner }) => {
     // Per-friend Tailscale is a later phase: never claim «Подключаюсь…» without a process behind it.
     conn = { id: 'tailscale', status: 'not_connected', message: 'Скоро: подключение своей домашней сети.' };
   }
-  // Write-only secret: only whether (and when) it was saved, never the value.
-  let haToken: { savedAt: string } | null = null;
-  if (isOwner) {
-    try {
-      const f = path.join(GROUPS_DIR, await folderOf(tenant), '.secrets', 'ha_token');
-      haToken = { savedAt: fs.lstatSync(f).mtime.toISOString() };
-    } catch {
-      haToken = null;
-    }
-  }
   return ok({
     connections: [conn],
     egress: await egressView(tenant, isOwner),
-    ...(isOwner ? { haToken, stt: sttView() } : {}),
+    ...(isOwner ? { stt: sttView() } : {}),
   });
 };
 
@@ -747,72 +737,12 @@ function sttView(): {
   };
 }
 
-const SERVER_MANAGED = 'Управляется сервером';
-
-/** Keys are not accepted yet: the owner's connector is server-managed, per-friend connectors come later. */
-const tsKey: Handler = async ({ isOwner }) => {
-  if (!isOwner) throw forbidden('Подключение своей сети пока недоступно');
-  throw conflict(SERVER_MANAGED);
-};
-
 const tsReconnect: Handler = async ({ tenant, isOwner }) => {
   // Friends have no connector of their own yet: nothing to reconnect.
   if (!isOwner) throw forbidden('Подключение своей сети пока недоступно');
   await syncOwnerConnector();
   await audit(tenant.user_id, 'tailscale_reconnect', tenant.user_id);
   return { status: 202, json: {} };
-};
-
-const tsDelete: Handler = async ({ isOwner }) => {
-  // Deleting the owner's connector would silently cut off all residential egress (502 connector_down).
-  if (isOwner) throw conflict(SERVER_MANAGED);
-  throw forbidden('Подключение своей сети пока недоступно');
-};
-
-// ---------- Home Assistant token (owner only, write-only) ----------
-
-const HA_TOKEN = /^[A-Za-z0-9._~+/=-]{20,4096}$/;
-
-/** `groups/<folder>/.secrets` (0700), refusing a symlink the agent may have planted in its writable folder. */
-function secretsDir(folder: string): string {
-  const base = path.join(GROUPS_DIR, folder);
-  const dir = path.join(base, '.secrets');
-  try {
-    if (fs.lstatSync(dir).isSymbolicLink()) throw conflict('Каталог секретов недоступен');
-  } catch (err) {
-    if (err instanceof ApiError) throw err;
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-  return dir;
-}
-
-/**
- * The long-lived Home Assistant token lives in a file only the owner's agent group sees
- * (`/workspace/agent/.secrets/ha_token`); nanogate injects no credentials on CONNECT. Never read back.
- */
-const haTokenPut: Handler = async ({ tenant, body }) => {
-  const token = typeof body.token === 'string' ? body.token.trim() : '';
-  if (!HA_TOKEN.test(token)) throw bad('Это не похоже на токен Home Assistant');
-  const dir = secretsDir(await folderOf(tenant));
-  const fd = fs.openSync(
-    path.join(dir, 'ha_token'),
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    fs.writeSync(fd, `${token}\n`);
-  } finally {
-    fs.closeSync(fd);
-  }
-  await audit(tenant.user_id, 'ha_token_saved', tenant.user_id); // never the value
-  return noContent;
-};
-
-const haTokenDelete: Handler = async ({ tenant }) => {
-  const dir = secretsDir(await folderOf(tenant));
-  fs.rmSync(path.join(dir, 'ha_token'), { force: true });
-  await audit(tenant.user_id, 'ha_token_removed', tenant.user_id);
-  return noContent;
 };
 
 // ---------- Groq key (owner only, write-only; host-only file, never under groups/) ----------
@@ -1142,11 +1072,7 @@ export const routes: Route[] = [
   { method: 'DELETE', re: new RegExp(`^/api/tasks/${seg}$`), handler: taskDelete },
   { method: 'GET', re: /^\/api\/usage$/, handler: usage },
   { method: 'GET', re: /^\/api\/connections$/, handler: connections },
-  { method: 'PUT', re: /^\/api\/connections\/tailscale\/key$/, handler: tsKey },
   { method: 'POST', re: /^\/api\/connections\/tailscale\/reconnect$/, handler: tsReconnect },
-  { method: 'DELETE', re: /^\/api\/connections\/tailscale$/, handler: tsDelete },
-  { method: 'PUT', re: /^\/api\/owner\/secrets\/ha-token$/, handler: haTokenPut, owner: true },
-  { method: 'DELETE', re: /^\/api\/owner\/secrets\/ha-token$/, handler: haTokenDelete, owner: true },
   { method: 'PUT', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyPut, owner: true },
   { method: 'DELETE', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyDelete, owner: true },
   { method: 'PUT', re: /^\/api\/egress$/, handler: egressPut },

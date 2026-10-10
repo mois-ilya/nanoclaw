@@ -44,7 +44,7 @@ export function Home() {
                 <div class="attn card">
                   {a.pendingRequests > 0 && <Row icon={{ name: 'requests', color: 'orange' }} title={`${count(a.pendingRequests, 'запрос ждёт', 'запроса ждут', 'запросов ждут')} решения`} chevron onClick={() => go({ name: 'requests' })} />}
                   {a.friendsOverBudget > 0 && <Row icon={{ name: 'friends', color: 'red' }} title={`${count(a.friendsOverBudget, 'друг', 'друга', 'друзей')} у лимита`} sub="Бюджет почти или полностью исчерпан" chevron onClick={() => go({ name: 'friends' })} />}
-                  {a.connectorIssues > 0 && <Row icon={{ name: 'alert', color: 'red' }} title={`${count(a.connectorIssues, 'подключение требует', 'подключения требуют', 'подключений требуют')} внимания`} chevron onClick={() => go({ name: 'system' })} />}
+                  {a.connectorIssues > 0 && <Row icon={{ name: 'alert', color: 'red' }} title={`${count(a.connectorIssues, 'подключение требует', 'подключения требуют', 'подключений требуют')} внимания`} chevron onClick={() => go({ name: 'connections' })} />}
                 </div>
               )}
 

@@ -12,19 +12,15 @@ describe('templates', () => {
     expect(p).toContain('Europe/Moscow');
     expect(p).not.toContain('Рамки безопасности'); // the locked rules are host-owned
   });
-  it('platform layer describes the real document tooling and says there is no pandoc/LibreOffice', () => {
+  it('document tooling is described once, in the runtime contract, not duplicated in the platform layer', () => {
+    const canon = fs.readFileSync(path.join(process.cwd(), 'container', 'CLAUDE.md'), 'utf8');
+    for (const w of ['openpyxl', 'python-docx', 'pypdf', 'pdftotext', 'pdftoppm', 'agent-browser', 'no** pandoc'])
+      expect(canon).toContain(w);
     for (const kind of ['owner', 'friend'] as const) {
       const l0 = platformLayer(kind, { name: 'Маша' });
-      for (const w of [
-        'openpyxl',
-        'python-docx',
-        'pypdf',
-        'pdftotext',
-        'pdftoppm',
-        'agent-browser',
-        'Pandoc и LibreOffice нет',
-      ])
-        expect(l0).toContain(w);
+      expect(l0).not.toContain('openpyxl');
+      expect(l0).not.toContain('install_packages');
+      expect(l0).not.toContain('groups connect');
     }
   });
   it('sanitises a hostile display name', () => {
