@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe('private message pipeline', () => {
-  it('route: 👀 + typing, then onInbound with the contract content shape', async () => {
+  it('route: «Thinking…» placeholder + typing, then onInbound with the contract content shape', async () => {
     await feed(
       upd({
         message: msg({
@@ -82,7 +82,8 @@ describe('private message pipeline', () => {
         }),
       }),
     );
-    expect(api.of('setMessageReaction')[0].params.reaction).toEqual([{ type: 'emoji', emoji: '👀' }]);
+    expect(api.of('sendMessageDraft')[0].params).toMatchObject({ chat_id: OWNER, text: '' });
+    expect(api.of('setMessageReaction')).toHaveLength(0);
     expect(api.of('sendChatAction')).toHaveLength(1);
     expect(inbound).toHaveLength(1);
     const { platformId, msg: m } = inbound[0];

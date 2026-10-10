@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
+import { formatMessages, stripInternalTags, stripLegacyTaskContract, turnIdOfBatch } from './formatter.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
@@ -254,9 +254,7 @@ describe('stripInternalTags', () => {
   });
 
   it('strips multi-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe(
-      'hello  world',
-    );
+    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe('hello  world');
   });
 
   it('strips multiple internal tag blocks', () => {
@@ -272,9 +270,7 @@ describe('stripInternalTags', () => {
   });
 
   it('preserves content that surrounds internal tags', () => {
-    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
-      'The answer is 42',
-    );
+    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe('The answer is 42');
   });
 });
 
@@ -325,5 +321,16 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+  });
+});
+
+describe('turnIdOfBatch', () => {
+  it('skips cross-session echo rows: the turn is the first real inbound row', () => {
+    expect(turnIdOfBatch(['tg:1:5:echo:sess-b', 'tg:1:9', 'tg:1:10'])).toBe('tg:1:9');
+    expect(turnIdOfBatch(['tg:1:9'])).toBe('tg:1:9');
+  });
+  it('an all-echo batch falls back to the first id', () => {
+    expect(turnIdOfBatch(['a:echo:s', 'b:echo:s'])).toBe('a:echo:s');
+    expect(turnIdOfBatch([])).toBeUndefined();
   });
 });

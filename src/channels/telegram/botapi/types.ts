@@ -572,6 +572,17 @@ export interface SendRichMessageDraftParams {
   keep_on_stop?: boolean;
 }
 
+/** Private chats only. Empty `text` shows the native «Thinking…» placeholder; the same draft_id animates changes. */
+export interface SendMessageDraftParams {
+  chat_id: number;
+  message_thread_id?: number;
+  /** Non-zero; same id animates changes. */
+  draft_id: number;
+  text?: string;
+  can_stop?: boolean;
+  keep_on_stop?: boolean;
+}
+
 export interface EditMessageTextParams {
   business_connection_id?: string;
   /** Required if inline_message_id is not specified. */
@@ -625,6 +636,7 @@ export interface Methods {
   sendMessage: { params: SendMessageParams; result: Message };
   sendRichMessage: { params: SendRichMessageParams; result: Message };
   sendRichMessageDraft: { params: SendRichMessageDraftParams; result: true };
+  sendMessageDraft: { params: SendMessageDraftParams; result: true };
   editMessageText: { params: EditMessageTextParams; result: Message | true };
   editMessageReplyMarkup: { params: EditMessageReplyMarkupParams; result: Message | true };
   deleteMessage: { params: { chat_id: ChatId; message_id: number }; result: true };

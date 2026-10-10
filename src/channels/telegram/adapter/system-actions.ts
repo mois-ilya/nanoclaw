@@ -4,7 +4,7 @@ import { getMessagingGroup } from '../../../db/messaging-groups.js';
 import { unguarded } from '../../../guard/types.js';
 import { log } from '../../../log.js';
 import type { Session } from '../../../types.js';
-import { chatIdFromPlatformId } from './format.js';
+import { chatIdFromPlatformId, parseThreadId } from './format.js';
 import { getRuntime } from './runtime.js';
 
 async function chatFor(session: Session): Promise<number | null> {
@@ -26,7 +26,8 @@ export async function handleTelemetry(
   try {
     const chatId = await chatFor(session);
     if (chatId === null || typeof c.turnId !== 'string') return;
-    const base = { chatId, turnId: c.turnId, sessionId: session.id };
+    // A per-thread DM session is one private-chat topic; the general conversation has no thread.
+    const base = { chatId, threadId: parseThreadId(session.thread_id), turnId: c.turnId, sessionId: session.id };
     if (action === 'turn') {
       const state = c.state;
       if (state === 'started' || state === 'finished' || state === 'cancelled' || state === 'failed') {

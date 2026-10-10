@@ -19,7 +19,7 @@ import { retryProvisioning } from './provision.js';
 import { audit, gateIdOf, getTenantByTg, noticeDue, updateTenant, type Tenant } from './store.js';
 import type { Session } from '../types.js';
 import { pushTenant } from './tenants.js';
-import { budgetBlock, handleTaskCallback } from './commands.js';
+import { budgetBlock, callbackThread, handleTaskCallback } from './commands.js';
 import { escapeMd, fmtUsd } from './util.js';
 
 type Result = { toast?: string } | void;
@@ -168,13 +168,19 @@ export function resetRetryGuardForTests(): void {
   recentRetry.clear();
 }
 
+/** Telegram topic (message_thread_id) of the message the button sits under; undefined = general conversation. */
+function topicNumber(q: CallbackQuery): number | undefined {
+  const th = callbackThread(q);
+  return th === null ? undefined : Number(th);
+}
+
 /** The presser's own ready tenant and DM session; a toast when there is none. */
 async function ownChat(q: CallbackQuery): Promise<{ tenant: Tenant; session: Session } | { toast: string }> {
   const chatId = q.message?.chat.id;
   if (chatId === undefined || chatId !== q.from.id) return { toast: 'Недоступно' };
   const tenant = await getTenantByTg(q.from.id);
   if (!tenant || tenant.state !== 'ready' || !tenant.agent_group_id) return { toast: 'Недоступно' };
-  const session = await dmSession(tenant, true);
+  const session = await dmSession(tenant, true, callbackThread(q));
   if (!session) return { toast: 'Недоступно' };
   return { tenant, session };
 }
@@ -193,7 +199,7 @@ async function onRetry(q: CallbackQuery, turnId: string): Promise<Result> {
   const base = /^tg:-?\d+:\d+/.exec(turnId)?.[0] ?? turnId;
   const last = recentRetry.get(base);
   if (last !== undefined && Date.now() - last < RETRY_GUARD_MS) return { toast: 'Уже запускаю' };
-  if (activeTurn(chatId) === true) return { toast: 'Я ещё отвечаю — подожди' };
+  if (activeTurn(chatId, topicNumber(q)) === true) return { toast: 'Я ещё отвечаю — подожди' };
   const blocked = await budgetBlock(own.tenant);
   if (blocked) return { toast: blocked };
   const prompt = await retryPrompt(chatId, turnId);
@@ -210,7 +216,7 @@ async function onRetry(q: CallbackQuery, turnId: string): Promise<Result> {
 async function onContinue(q: CallbackQuery): Promise<Result> {
   const own = await ownChat(q);
   if ('toast' in own) return own;
-  if (activeTurn(q.from.id) === true) return { toast: 'Я ещё отвечаю — подожди' };
+  if (activeTurn(q.from.id, topicNumber(q)) === true) return { toast: 'Я ещё отвечаю — подожди' };
   const blocked = await budgetBlock(own.tenant);
   if (blocked) return { toast: blocked };
   await injectChat(own.session, q.from.id, 'продолжай', { sender: own.tenant.name });
@@ -224,7 +230,7 @@ async function onNewConversation(q: CallbackQuery): Promise<Result> {
   if ('toast' in own) return own;
   await injectChat(own.session, q.from.id, '/clear', { silent: true, wake: isContainerRunning(own.session.id) });
   await spent(q);
-  await tg.sendProduct(q.from.id, copy.newConversation(), { silent: true });
+  await tg.sendProduct(q.from.id, copy.newConversation(), { silent: true, threadId: topicNumber(q) });
   return;
 }
 

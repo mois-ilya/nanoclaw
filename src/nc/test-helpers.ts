@@ -14,12 +14,13 @@ export interface Sent {
   md: string;
   buttons?: ProductButton[][];
   messageId: number;
+  threadId?: number;
 }
 
 export function installFakeAdapter(
   opts: {
     replay?: (u: unknown) => Promise<void>;
-    hasActiveTurn?: (chatId: number) => boolean | undefined;
+    hasActiveTurn?: (chatId: number, threadId?: number) => boolean | undefined;
     retryPrompt?: (chatId: number, turnId: string) => Promise<string | undefined>;
     buttonValue?: (chatId: number, shortId: string, kind: string) => Promise<string | undefined>;
   } = {},
@@ -47,7 +48,7 @@ export function installFakeAdapter(
   const impl: AdapterSend = {
     async sendProduct(chatId, md, opts) {
       const messageId = nextId++;
-      sent.push({ chatId, md, buttons: opts?.buttons, messageId });
+      sent.push({ chatId, md, buttons: opts?.buttons, messageId, threadId: opts?.threadId });
       return { messageId };
     },
     async editProduct(chatId, messageId, md, opts) {

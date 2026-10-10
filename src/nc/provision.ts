@@ -38,7 +38,7 @@ import {
 } from './store.js';
 import { ensureDmWiring, pushTenant, rememberGroupTenant } from './tenants.js';
 import { friendPersona } from './templates.js';
-import { escapeMd, fmtUsd, withLock } from './util.js';
+import { escapeMd, fmtUsd, topicThreadId, withLock } from './util.js';
 import { setChatSurface } from './surface.js';
 
 const STEPS = [
@@ -132,7 +132,7 @@ export async function replayRetained(t: Tenant): Promise<number> {
     await routeInbound({
       channelType: 'telegram',
       platformId: platformIdOf(t.tg_id),
-      threadId: null,
+      threadId: topicThreadId(m),
       message: {
         id: `tg:${t.tg_id}:${m.message_id}`,
         kind: 'chat',

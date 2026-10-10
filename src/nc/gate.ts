@@ -7,7 +7,7 @@
 import { log } from '../log.js';
 import { budgetFor, globalCapCopy, globalCapUntil, isExhausted, periodEndLabel } from './budget.js';
 import { copy } from './copy.js';
-import { DAY_MS, displayName, escapeMd, withLock } from './util.js';
+import { DAY_MS, displayName, escapeMd, topicThreadId, withLock } from './util.js';
 import { nc, ownerTgId } from './config.js';
 import type { GateDecision, PrivateUpdateCtx } from './port.js';
 import { tg } from './port.js';
@@ -27,9 +27,12 @@ import {
 const HANDLED: GateDecision = { action: 'handled' };
 const ROUTE: GateDecision = { action: 'route' };
 
-async function say(chatId: number, md: string, buttons?: Parameters<typeof tg.sendProduct>[2]): Promise<void> {
+/** Courtesy reply into the conversation (topic or general) the message came from. */
+async function say(ctx: PrivateUpdateCtx, md: string, buttons?: Parameters<typeof tg.sendProduct>[2]): Promise<void> {
+  const chatId = ctx.user.id;
+  const th = topicThreadId(ctx.message);
   try {
-    await tg.sendProduct(chatId, md, buttons);
+    await tg.sendProduct(chatId, md, th === null ? buttons : { ...buttons, threadId: Number(th) });
   } catch (err) {
     // A failed courtesy reply must not make the adapter retry the whole update.
     log.warn('nc: gate reply failed', { chatId, err });
@@ -104,7 +107,7 @@ async function requestAccess(ctx: PrivateUpdateCtx, existing: boolean): Promise<
       log.error('nc: owner access card failed', { err });
     }
   }
-  await say(tgId, copy.pendingFirst());
+  await say(ctx, copy.pendingFirst());
 }
 
 async function gateFriend(ctx: PrivateUpdateCtx): Promise<GateDecision> {
@@ -127,7 +130,7 @@ async function gateFriend(ctx: PrivateUpdateCtx): Promise<GateDecision> {
         const snapCmd = await budgetFor(gateIdOf(t));
         if (isExhausted(snapCmd) && snapCmd) {
           await say(
-            tgId,
+            ctx,
             copy.budgetExhausted(snapCmd.limitMicros ?? t.limit_usd_micros ?? 0, periodEndLabel(snapCmd)),
             {
               buttons: [[{ text: `Попросить ${nc.ownerNameGen()} поднять`, data: `p:rl:${tgId}` }]],
@@ -135,38 +138,38 @@ async function gateFriend(ctx: PrivateUpdateCtx): Promise<GateDecision> {
           );
           return HANDLED;
         }
-        await say(tgId, copy.unknownCommand());
+        await say(ctx, copy.unknownCommand());
         return HANDLED;
       }
       if (globalCapUntil()) {
-        await say(tgId, globalCapCopy(false));
+        await say(ctx, globalCapCopy(false));
         return HANDLED;
       }
       const snap = await budgetFor(gateIdOf(t));
       if (isExhausted(snap) && snap) {
-        await say(tgId, copy.budgetExhausted(snap.limitMicros ?? t.limit_usd_micros ?? 0, periodEndLabel(snap)), {
+        await say(ctx, copy.budgetExhausted(snap.limitMicros ?? t.limit_usd_micros ?? 0, periodEndLabel(snap)), {
           buttons: [[{ text: `Попросить ${nc.ownerNameGen()} поднять`, data: `p:rl:${tgId}` }]],
         });
         return HANDLED;
       }
       if (!snap && (await noticeDue(tgId, 'svc-down', 10 * 60_000))) {
         // nanogate unreachable: the message is still routed (and stays pending), but say so once.
-        await say(tgId, copy.serviceDown());
+        await say(ctx, copy.serviceDown());
       }
       return ROUTE;
     }
     case 'paused':
-      if (await noticeDue(tgId, 'paused', DAY_MS)) await say(tgId, copy.paused());
+      if (await noticeDue(tgId, 'paused', DAY_MS)) await say(ctx, copy.paused());
       return HANDLED;
     case 'pending':
       if (!isBareStart(ctx)) await retain(tgId, JSON.stringify(ctx.update));
-      if (await noticeDue(tgId, 'pending', DAY_MS)) await say(tgId, copy.pendingWaiting());
+      if (await noticeDue(tgId, 'pending', DAY_MS)) await say(ctx, copy.pendingWaiting());
       return HANDLED;
     case 'provisioning':
     case 'provisioning_failed':
       if (!isBareStart(ctx)) await retain(tgId, JSON.stringify(ctx.update));
       if (await noticeDue(tgId, `prov-${t.state}`, 60 * 60_000)) {
-        await say(tgId, t.state === 'provisioning' ? copy.provisioning() : copy.provisioningFailed());
+        await say(ctx, t.state === 'provisioning' ? copy.provisioning() : copy.provisioningFailed());
       }
       return HANDLED;
     case 'denied': {
@@ -178,7 +181,7 @@ async function gateFriend(ctx: PrivateUpdateCtx): Promise<GateDecision> {
     case 'deleted': {
       const until = t.denied_until ? Date.parse(t.denied_until) : Infinity;
       if (until > Date.now()) {
-        if (await noticeDue(tgId, 'closed', DAY_MS)) await say(tgId, copy.closed());
+        if (await noticeDue(tgId, 'closed', DAY_MS)) await say(ctx, copy.closed());
         return HANDLED;
       }
       await requestAccess(ctx, true); // cooldown over or owner reopened: a fresh request, a fresh nanogate tenant id
@@ -196,7 +199,7 @@ export async function privateGate(ctx: PrivateUpdateCtx): Promise<GateDecision> 
   const owner = ownerTgId();
   if (owner !== null && tgId === owner) {
     if (ctx.kind !== 'command' && globalCapUntil()) {
-      await say(tgId, globalCapCopy(true), { buttons: [[{ text: 'Открыть «Система»', webApp: 'system' }]] });
+      await say(ctx, globalCapCopy(true), { buttons: [[{ text: 'Открыть «Система»', webApp: 'system' }]] });
       return HANDLED;
     }
     return ROUTE;

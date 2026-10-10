@@ -20,7 +20,7 @@ import { parseSkillSelection } from '../../container-config.js';
 import { log } from '../../log.js';
 import { nanogateAdmin, type BudgetSnapshot } from '../../gateway-providers/nanogate/index.js';
 import { dmSession, injectChat } from '../chat.js';
-import { activeTurn } from '../port.js';
+import { activeTurnInChat } from '../port.js';
 import { invalidateBudget } from '../budget.js';
 import { approveRequest, denyRequest } from '../decisions.js';
 import { nc, ownerTgId, presetConfig, tgIdOfUserId, USD, userIdOf, type Preset } from '../config.js';
@@ -254,7 +254,7 @@ const home: Handler = async ({ tenant, isOwner }) => {
   let recentMemory: HomeView['recentMemory'] = [];
   if (tenant.state === 'ready' && tenant.agent_group_id) {
     // «Занят» only while a turn is really in flight; a warm idle container is not busy.
-    if (activeTurn(tenant.tg_id) === true) status = 'busy';
+    if (activeTurnInChat(tenant.tg_id) === true) status = 'busy';
     nextTasks = (await listTasks(tenant.agent_group_id).catch(() => []))
       .filter((x) => x.status === 'active' && x.nextRunAt)
       .sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)))

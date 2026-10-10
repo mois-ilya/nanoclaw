@@ -18,6 +18,7 @@ import {
   type SendDocumentParams,
   type SendMessageParams,
   type SendPhotoParams,
+  type SendMessageDraftParams,
   type SendRichMessageDraftParams,
   type SendRichMessageParams,
   type SentGuestMessage,
@@ -323,6 +324,9 @@ export class BotApi {
   }
   sendRichMessageDraft(params: SendRichMessageDraftParams): Promise<true> {
     return this.call('sendRichMessageDraft', params);
+  }
+  sendMessageDraft(params: SendMessageDraftParams): Promise<true> {
+    return this.call('sendMessageDraft', params);
   }
   editMessageText(params: EditMessageTextParams): Promise<Message | true> {
     return this.call('editMessageText', params);

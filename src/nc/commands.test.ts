@@ -176,6 +176,33 @@ describe('/tasks list', () => {
     expect(injectChat).toHaveBeenCalledWith(expect.anything(), FRIEND_A, '/stop');
   });
 
+  it('/new and /stop typed in a topic act on that topic (its session, its turn)', async () => {
+    running.v = true;
+    const topicCtx = (id: number, thread: number): PrivateUpdateCtx => ({
+      ...c(id),
+      message: {
+        message_id: 5,
+        message_thread_id: thread,
+        is_topic_message: true,
+        chat: { id, type: 'private' },
+        date: 1,
+      },
+    });
+    const active = vi.fn((_chat: number, thread?: number) => thread === 7);
+    fake = installFakeAdapter({ hasActiveTurn: active });
+    await commandHandler(topicCtx(FRIEND_A, 7), '/stop', '');
+    expect(dmSession).toHaveBeenLastCalledWith(expect.anything(), false, '7');
+    expect(active).toHaveBeenLastCalledWith(FRIEND_A, 7);
+    expect(injectChat).toHaveBeenLastCalledWith(expect.anything(), FRIEND_A, '/stop');
+    // the same command in another topic finds nothing running there
+    injectChat.mockClear();
+    await commandHandler(topicCtx(FRIEND_A, 8), '/stop', '');
+    expect(injectChat).not.toHaveBeenCalled();
+    expect(fake.sent.at(-1)!.md).toBe('Сейчас нечего останавливать.');
+    await commandHandler(topicCtx(FRIEND_A, 8), '/new', '');
+    expect(dmSession).toHaveBeenLastCalledWith(expect.anything(), true, '8');
+  });
+
   it('/stop still reaches a container with a claimed row when the adapter lost the turn (host restart)', async () => {
     running.v = true;
     claims.n = 1;

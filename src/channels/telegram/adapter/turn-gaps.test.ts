@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { TelegramError } from '../botapi/index.js';
 import { FakeApi } from './fakes.js';
 import { Deliverer } from './deliver.js';
 import { resetHooks, setBudgetNoteProvider, setUserPrefsProvider } from './hooks.js';
@@ -24,6 +25,12 @@ const send = async (content: Record<string, unknown>, files?: Array<{ filename: 
   await tick(3000);
   return p;
 };
+/** The «Thinking…» placeholder is rejected: the message gets the 👀 instead. */
+const failPlaceholder = () =>
+  api.failNext(
+    'sendMessageDraft',
+    new TelegramError({ method: 'sendMessageDraft', kind: 'bad_request', code: 400, description: 'no drafts' }),
+  );
 const start = (turnId = T) => rt.turns.onTurn({ chatId: CHAT, turnId, sessionId: 'sess-1', state: 'started' });
 const finish = (state: 'finished' | 'cancelled' | 'failed' = 'finished', turnId = T) =>
   rt.turns.onTurn({ chatId: CHAT, turnId, sessionId: 'sess-1', state });
@@ -57,7 +64,9 @@ afterEach(() => {
 
 describe('gap 1/13: interim chat rows do not close the turn', () => {
   it('interim message, 3 steps, final: drafts continue, details on the last message, 👀 cleared only at the end', async () => {
+    failPlaceholder();
     rt.turns.noteInbound(CHAT, 7);
+    await tick(0);
     start();
     await tick(500);
     await send({ text: 'Принял, займусь' });
@@ -138,7 +147,9 @@ describe('gap 21/22/26-28: scheduled-task rows are standalone and respect quiet 
 
 describe('gap 2/23: dead turns end', () => {
   it('idle watchdog closes a turn without events and sends the failure copy with [Повторить]', async () => {
+    failPlaceholder();
     rt.turns.noteInbound(CHAT, 7);
+    await tick(0);
     start();
     await tick(6 * 60_000);
     const n = api.of('sendRichMessageDraft').length;
@@ -352,7 +363,7 @@ describe('gap 9: voice echo', () => {
     await rt.turns.noteVoice(CHAT, 7, [{ kind: 'audio', transcript: 'привет' }]);
     start();
     rt.turns.failTurnsForSession('sess-1');
-    await tick(1000);
+    await tick(2000); // the draft sent at turn start holds the spacing slot for a second
     const m = api.of('sendRichMessage').pop()!;
     expect(J(m)).toContain('🎧 Расшифровка: «привет»');
     expect(J(m)).toContain('Что-то сломалось');

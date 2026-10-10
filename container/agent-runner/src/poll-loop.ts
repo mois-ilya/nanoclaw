@@ -28,6 +28,7 @@ import {
   isStopCommand,
   isRunnerCommand,
   isSessionEcho,
+  turnIdOfBatch,
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
@@ -516,8 +517,8 @@ export async function processQuery(
     armTurnTimer(); // nanoclaw-fork
   };
   // nanoclaw-fork: the opening batch's turn is already answering.
-  if (answering) turnTelemetry.beginTurn(initialBatchIds[0], routing);
-  let currentTurnId: string | undefined = initialBatchIds[0];
+  if (answering) turnTelemetry.beginTurn(turnIdOfBatch(initialBatchIds), routing);
+  let currentTurnId: string | undefined = turnIdOfBatch(initialBatchIds);
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string): void => {
@@ -629,7 +630,7 @@ export async function processQuery(
         query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
-          turnId: keptIds[0],
+          turnId: turnIdOfBatch(keptIds),
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
@@ -875,7 +876,9 @@ export async function processQuery(
       try {
         await deliverTimeout(timedOutRouting, partial, timedOutTurnId);
       } catch (noticeError) {
-        log(`Failed to deliver timeout notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`);
+        log(
+          `Failed to deliver timeout notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+        );
       }
     }
     // Continuation recovery receives the original error; diagnostics remain
@@ -1428,7 +1431,9 @@ async function noticeDroppedFollowUps(routes: RoutingContext[]): Promise<void> {
         platform_id: r.platformId,
         channel_type: r.channelType,
         thread_id: r.threadId,
-        content: JSON.stringify({ text: 'Остановил. Сообщения, которые ты прислал следом, я не успел обработать — пришли их ещё раз.' }),
+        content: JSON.stringify({
+          text: 'Остановил. Сообщения, которые ты прислал следом, я не успел обработать — пришли их ещё раз.',
+        }),
       });
     } catch (err) {
       log(`Failed to deliver dropped-follow-up notice: ${err instanceof Error ? err.message : String(err)}`);

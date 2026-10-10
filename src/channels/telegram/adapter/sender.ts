@@ -14,6 +14,7 @@ import {
 } from '../botapi/index.js';
 import { LIMITS, renderMarkdown } from '../render/index.js';
 import { log } from '../../../log.js';
+import { threadParam } from './format.js';
 import { blocksToPlainChunks } from './plainblocks.js';
 import type { Priority, Scheduler } from './scheduler.js';
 
@@ -31,6 +32,8 @@ export interface SendOpts {
   /** true -> disable_notification; false -> explicitly notify; undefined -> Telegram default. */
   silent?: boolean;
   replyTo?: number;
+  /** Private-chat topic (`message_thread_id`) the message belongs to. */
+  threadId?: number;
   markup?: InlineKeyboardMarkup;
   /** Mutate the rendered messages (details block, budget footer). */
   decorate?: (messages: InputRichMessage[]) => InputRichMessage[];
@@ -145,6 +148,7 @@ export class Sender {
         this.d.api.sendDocument({
           chat_id: chatId,
           document: new InputFile(Buffer.from(md, 'utf8'), 'answer.md'),
+          ...threadParam(opts.threadId),
           ...(opts.silent !== undefined ? { disable_notification: opts.silent } : {}),
           ...(opts.markup ? { reply_markup: opts.markup } : {}),
         }),
@@ -159,6 +163,7 @@ export class Sender {
   private params(chatId: number, opts: SendOpts, isFirst: boolean, isLast: boolean) {
     return {
       chat_id: chatId,
+      ...threadParam(opts.threadId),
       ...(opts.silent !== undefined ? { disable_notification: opts.silent } : {}),
       ...(isFirst && opts.replyTo
         ? { reply_parameters: { message_id: opts.replyTo, allow_sending_without_reply: true } }

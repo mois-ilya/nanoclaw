@@ -41,3 +41,11 @@ export function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Router thread id of a message's private-chat topic; null = outside any topic (the general conversation). */
+export function topicThreadId(
+  m: { message_thread_id?: number; is_topic_message?: boolean } | undefined,
+): string | null {
+  const n = m?.is_topic_message === true ? m.message_thread_id : undefined;
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? String(n) : null;
+}

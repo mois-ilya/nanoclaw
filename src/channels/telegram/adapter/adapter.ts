@@ -4,14 +4,14 @@ import { log } from '../../../log.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup } from '../../adapter.js';
 import { COPY } from './copy.js';
 import { Deliverer } from './deliver.js';
-import { chatIdFromPlatformId } from './format.js';
+import { chatIdFromPlatformId, parseThreadId } from './format.js';
 import { Ingress } from './ingress.js';
 import { Poller } from './poller.js';
 import { createRuntime, setReplayHandler, setRuntime, type TelegramRuntime } from './runtime.js';
 import { DbStore, type TgStore } from './store.js';
 
 export const TELEGRAM_DEFAULTS: ChannelDefaults = {
-  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
   group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'strict' },
   mentions: 'dm-only',
 };
@@ -80,7 +80,8 @@ export function createTelegramAdapter(o: TelegramAdapterOptions): ChannelAdapter
   return {
     name: 'telegram',
     channelType: 'telegram',
-    supportsThreads: false,
+    // Private-chat topics only: group chats stay unthreaded (see TELEGRAM_DEFAULTS.group).
+    supportsThreads: true,
     defaults: TELEGRAM_DEFAULTS,
 
     async setup(host: ChannelSetup) {
@@ -122,9 +123,9 @@ export function createTelegramAdapter(o: TelegramAdapterOptions): ChannelAdapter
       return deliverer.deliver(platformId, threadId, message);
     },
 
-    async setTyping(platformId) {
+    async setTyping(platformId, threadId) {
       const chatId = chatIdFromPlatformId(platformId);
-      if (chatId !== null) rt?.turns.sendTyping(chatId);
+      if (chatId !== null) rt?.turns.sendTyping(chatId, parseThreadId(threadId));
     },
 
     async openDM(userHandle: string) {

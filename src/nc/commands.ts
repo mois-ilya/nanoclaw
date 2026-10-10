@@ -16,12 +16,25 @@ import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling
 import { lookupTaskToken, mintTaskToken } from './tasktokens.js';
 import { isContainerRunning } from '../container-runner.js';
 import { withExistingMailboxSession } from '../session-manager.js';
-import { escapeMd, fmtUsd } from './util.js';
+import { escapeMd, fmtUsd, topicThreadId } from './util.js';
 
 async function hasProcessingClaim(s: { id: string; agent_group_id: string }): Promise<boolean> {
   return withExistingMailboxSession(s.agent_group_id, s.id, (m) => m.getProcessingClaims().length > 0)
     .then((r) => r === true)
     .catch(() => false);
+}
+
+// ---------- topics ----------
+
+/** Topic of the private chat the command / button came from; null = the general conversation. */
+function ctxThread(ctx: PrivateUpdateCtx): string | null {
+  return topicThreadId(ctx.message);
+}
+
+/** Reply into the conversation the command came from (topic or general). */
+function say(ctx: PrivateUpdateCtx, md: string, opts: Parameters<typeof tg.sendProduct>[2] = {}) {
+  const th = ctxThread(ctx);
+  return tg.sendProduct(ctx.chatId, md, th === null ? opts : { ...opts, threadId: Number(th) });
 }
 
 // ---------- task list + buttons ----------
@@ -141,7 +154,7 @@ export async function handleTaskCallback(q: CallbackQuery, op: string, token: st
       if (!detail && !said) return { toast: 'Не найдено' };
       const blocked = await budgetBlock(t);
       if (blocked) return { toast: blocked };
-      const session = await dmSession(t, true);
+      const session = await dmSession(t, true, callbackThread(q));
       const prepared = prepareScheduledTask({
         name: (detail?.name ?? said).slice(0, 50),
         prompt: detail?.prompt ?? `Напомни пользователю: ${said}`,
@@ -156,7 +169,7 @@ export async function handleTaskCallback(q: CallbackQuery, op: string, token: st
       // [Изменить время]: the agent asks when and moves it.
       const name = (await listTasks(group)).find((x) => x.id === entry.seriesId)?.name;
       if (!name) return { toast: 'Не найдено' };
-      const session = await dmSession(t, true);
+      const session = await dmSession(t, true, callbackThread(q));
       if (!session) return { toast: 'Недоступно' };
       await injectChat(
         session,
@@ -177,6 +190,11 @@ export async function handleTaskCallback(q: CallbackQuery, op: string, token: st
   return { toast: 'Ошибка' };
 }
 
+/** Topic of the message a button sits under (null = general conversation). */
+export function callbackThread(q: CallbackQuery): string | null {
+  return topicThreadId(q.message as { message_thread_id?: number; is_topic_message?: boolean } | undefined);
+}
+
 /** Why a task cannot be resumed right now (budget exhausted), or null. */
 export async function budgetBlock(t: Tenant): Promise<string | null> {
   const snap = await budgetFor(gateIdOf(t));
@@ -193,7 +211,7 @@ async function activeTenant(ctx: PrivateUpdateCtx): Promise<Tenant | undefined> 
 
 async function cmdTasks(ctx: PrivateUpdateCtx, t: Tenant): Promise<void> {
   const v = await renderTaskList(ctx.user.id, t.agent_group_id!);
-  await tg.sendProduct(ctx.chatId, v.md, v.buttons.length ? { buttons: v.buttons } : undefined);
+  await say(ctx, v.md, v.buttons.length ? { buttons: v.buttons } : undefined);
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -210,16 +228,16 @@ async function cmdFriends(ctx: PrivateUpdateCtx): Promise<void> {
   const pending = await listPendingRequests();
   const denied = all.filter((t) => t.state === 'denied' || t.state === 'deleted');
   if (friends.length === 0 && pending.length === 0 && denied.length === 0) {
-    await tg.sendProduct(ctx.chatId, 'Друзей пока нет.', {
+    await say(ctx, 'Друзей пока нет.', {
       buttons: [[{ text: 'Открыть кабинет', webApp: 'requests' }]],
     });
     return;
   }
   if (pending.length) {
-    await tg.sendProduct(ctx.chatId, '**Запросы**', { silent: true });
+    await say(ctx, '**Запросы**', { silent: true });
     for (const r of pending.slice(0, 10)) {
       const t = await getTenantByTg(r.tg_id);
-      await tg.sendProduct(ctx.chatId, `**${escapeMd(t?.name ?? String(r.tg_id), 80)}** · ⏳ ждёт решения`, {
+      await say(ctx, `**${escapeMd(t?.name ?? String(r.tg_id), 80)}** · ⏳ ждёт решения`, {
         silent: true,
         buttons: [
           [
@@ -230,7 +248,7 @@ async function cmdFriends(ctx: PrivateUpdateCtx): Promise<void> {
       });
     }
   }
-  if (friends.length) await tg.sendProduct(ctx.chatId, '**Друзья**', { silent: true });
+  if (friends.length) await say(ctx, '**Друзья**', { silent: true });
   for (const f of friends.slice(0, 10)) {
     const b = f.state === 'ready' || f.state === 'paused' ? await budgetFor(gateIdOf(f)) : null;
     const spend = b ? `${fmtUsd(b.usedMicros)} из ${b.limitMicros === null ? '∞' : fmtUsd(b.limitMicros)}` : '—';
@@ -252,20 +270,20 @@ async function cmdFriends(ctx: PrivateUpdateCtx): Promise<void> {
           : f.state === 'provisioning_failed'
             ? [[{ text: 'Повторить', data: `p:rt:${f.tg_id}` }]]
             : [];
-    await tg.sendProduct(ctx.chatId, `**${escapeMd(f.name, 80)}** · ${STATE_LABEL[f.state]} · ${spend}`, {
+    await say(ctx, `**${escapeMd(f.name, 80)}** · ${STATE_LABEL[f.state]} · ${spend}`, {
       buttons,
       silent: true,
     });
   }
   if (denied.length) {
-    await tg.sendProduct(ctx.chatId, '**Отклонённые и удалённые** — можно открыть доступ снова:', {
+    await say(ctx, '**Отклонённые и удалённые** — можно открыть доступ снова:', {
       silent: true,
       buttons: denied
         .slice(0, 8)
         .map((d) => [{ text: `Открыть снова: ${d.name.slice(0, 24)}`, data: `p:ro:${d.tg_id}` }]),
     });
   }
-  await tg.sendProduct(ctx.chatId, 'Подробности и лимиты — в кабинете.', {
+  await say(ctx, 'Подробности и лимиты — в кабинете.', {
     buttons: [[{ text: 'Открыть кабинет', webApp: 'friends' }]],
     silent: true,
   });
@@ -289,17 +307,17 @@ export async function commandHandler(ctx: PrivateUpdateCtx, command: string, _ar
 
   const t = isOwner ? await getTenantByTg(ctx.user.id) : await activeTenant(ctx);
   if (!t || !t.agent_group_id) {
-    if (cmd === 'help' || cmd === 'start') await tg.sendProduct(ctx.chatId, copy.help(isOwner));
+    if (cmd === 'help' || cmd === 'start') await say(ctx, copy.help(isOwner));
     return true;
   }
   try {
     switch (cmd) {
       case 'start':
       case 'help':
-        await tg.sendProduct(ctx.chatId, copy.help(isOwner));
+        await say(ctx, copy.help(isOwner));
         return true;
       case 'menu':
-        await tg.sendProduct(ctx.chatId, '**Кабинет**: расход, память, задачи и настройки.', {
+        await say(ctx, '**Кабинет**: расход, память, задачи и настройки.', {
           buttons: [
             [{ text: 'Открыть кабинет', webApp: '' }],
             [
@@ -311,20 +329,21 @@ export async function commandHandler(ctx: PrivateUpdateCtx, command: string, _ar
         });
         return true;
       case 'new': {
-        const s = await dmSession(t, true);
+        const s = await dmSession(t, true, ctxThread(ctx));
         // The Russian line below is the only confirmation; a cold container is not started just to forget.
         if (s) await injectChat(s, ctx.user.id, '/clear', { silent: true, wake: isContainerRunning(s.id) });
-        await tg.sendProduct(ctx.chatId, copy.newConversation(), { silent: true });
+        await say(ctx, copy.newConversation(), { silent: true });
         return true;
       }
       case 'stop': {
-        const s = await dmSession(t);
+        const s = await dmSession(t, false, ctxThread(ctx));
         // Nothing can be running without a container or an in-flight turn: answer at once, never cold-start one.
-        const turn = activeTurn(ctx.user.id);
+        const th = ctxThread(ctx);
+        const turn = activeTurn(ctx.user.id, th === null ? undefined : Number(th));
         // The adapter may have lost the turn (host restart with an adopted container): a claimed inbound row still counts.
         const claimed = !!s && turn === false && isContainerRunning(s.id) && (await hasProcessingClaim(s));
         if (!s || !isContainerRunning(s.id) || (turn === false && !claimed)) {
-          await tg.sendProduct(ctx.chatId, copy.nothingToStop(), { silent: true });
+          await say(ctx, copy.nothingToStop(), { silent: true });
           return true;
         }
         await injectChat(s, ctx.user.id, '/stop');
@@ -337,21 +356,19 @@ export async function commandHandler(ctx: PrivateUpdateCtx, command: string, _ar
         await cmdFriends(ctx);
         return true;
       case 'guest':
-        await tg.sendProduct(ctx.chatId, 'Гостевой контекст — в кабинете.', {
+        await say(ctx, 'Гостевой контекст — в кабинете.', {
           buttons: [[{ text: 'Открыть «Гость»', webApp: 'guest' }]],
         });
         return true;
       case 'health':
-        await tg.sendProduct(ctx.chatId, await healthReport());
+        await say(ctx, await healthReport());
         return true;
     }
   } catch (err) {
     log.error('nc: command failed', { cmd, err });
     await recordError('command', cmd, err instanceof Error ? err.message : String(err)).catch(() => undefined);
     if (cmd === 'health')
-      await tg
-        .sendProduct(ctx.chatId, '⚠️ Не удалось собрать статус сервера. Подробности в журнале.')
-        .catch(() => undefined);
+      await say(ctx, '⚠️ Не удалось собрать статус сервера. Подробности в журнале.').catch(() => undefined);
   }
   return true;
 }

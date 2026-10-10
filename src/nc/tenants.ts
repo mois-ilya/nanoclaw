@@ -27,6 +27,7 @@ import {
   getMessagingGroupAgentByPair,
   getMessagingGroupAgents,
   getMessagingGroupByPlatform,
+  updateMessagingGroupAgent,
 } from '../db/messaging-groups.js';
 import { initGroupFilesystem } from '../group-init.js';
 import { log } from '../log.js';
@@ -41,7 +42,7 @@ import {
 } from '../gateway-providers/nanogate/index.js';
 import { grantRole, isOwner } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
-import type { AgentGroup, MessagingGroup } from '../types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from '../types.js';
 import { ownerPersona } from './templates.js';
 import { nc, ownerTgId, platformIdOf, presetConfig, tgIdOfUserId, userIdOf } from './config.js';
 import {
@@ -169,6 +170,30 @@ async function ensureDmDestination(agentGroupId: string, messagingGroupId: strin
   }
 }
 
+/**
+ * A DM is per-thread: every topic of the private chat is its own conversation (own session and context), the chat
+ * outside topics is the «general» one (thread null). Memory and files are shared — it is one agent group.
+ */
+async function upgradeDmWiring(w: MessagingGroupAgent): Promise<void> {
+  if (w.session_mode === 'per-thread' && w.threads === 1) return;
+  await updateMessagingGroupAgent(w.id, { session_mode: 'per-thread', threads: 1 });
+}
+
+/** Bring the DM wirings of every known tenant (owner, friends) to per-thread; idempotent. */
+export async function upgradeDmWirings(): Promise<number> {
+  let upgraded = 0;
+  for (const t of await listTenants()) {
+    if (!t.agent_group_id) continue;
+    const mg = await getMessagingGroupByPlatform('telegram', platformIdOf(t.tg_id));
+    if (!mg) continue;
+    const w = await getMessagingGroupAgentByPair(mg.id, t.agent_group_id);
+    if (!w || (w.session_mode === 'per-thread' && w.threads === 1)) continue;
+    await upgradeDmWiring(w);
+    upgraded++;
+  }
+  return upgraded;
+}
+
 export async function ensureDmWiring(
   tgId: number,
   displayName: string,
@@ -201,10 +226,13 @@ export async function ensureDmWiring(
       engage_pattern: '.',
       sender_scope: 'known',
       ignored_message_policy: 'drop',
-      session_mode: 'shared',
+      session_mode: 'per-thread',
+      threads: 1,
       priority: 0,
       created_at: now,
     });
+  } else {
+    await upgradeDmWiring(existing);
   }
   // A DM belongs to exactly one agent group. Wiring left by an earlier install of this database (the upstream
   // chat install, a deleted life) would fan every message out to a group with no tenant and fail the spawn.
@@ -271,6 +299,8 @@ export async function bootstrapOwner(): Promise<{ nanogateOk: boolean }> {
   ownerGroupId = ag.id;
 
   await ensureDmWiring(tgId, nc.ownerName(), ag);
+  // Friends provisioned before topics existed keep a shared-session wiring until they are upgraded here.
+  await upgradeDmWirings().catch((err) => log.warn('nc: DM wiring upgrade failed', { err }));
 
   const createdTenant = await insertTenantIfAbsent({ tgId, name: nc.ownerName(), state: 'ready' });
   await updateTenant(tgId, { state: 'ready', agent_group_id: ag.id, limit_usd_micros: null });

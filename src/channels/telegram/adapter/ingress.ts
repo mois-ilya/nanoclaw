@@ -7,6 +7,7 @@ import { FileTooLargeError, TelegramError, type CallbackQuery, type Message, typ
 import { log } from '../../../log.js';
 import type { ChannelSetup } from '../../adapter.js';
 import { COPY } from './copy.js';
+import { convKey, parseThreadId } from './format.js';
 import type { VoiceEcho } from './store.js';
 import { getHooks, type GateDecision, type PrivateUpdateCtx, type TgUser } from './hooks.js';
 import { saveRetryPrompt, type TelegramRuntime } from './runtime.js';
@@ -51,6 +52,22 @@ interface Attachment {
   mimeType: string;
   size: number;
   data: string;
+}
+
+/** Private-chat topic of a message (`message_thread_id`); undefined = outside any topic (the general conversation). */
+export function topicOf(m: { message_thread_id?: number; is_topic_message?: boolean } | undefined): number | undefined {
+  return m?.is_topic_message === true ? parseThreadId(m.message_thread_id) : undefined;
+}
+
+/** Topic of the message a callback button sits under. */
+function callbackTopic(q: CallbackQuery): number | undefined {
+  const m = q.message;
+  return m && 'message_thread_id' in m ? topicOf(m) : undefined;
+}
+
+/** A slash command no product handler took: the router's command gate may drop it, so no turn is guaranteed. */
+function isUnhandledSlash(ctx: PrivateUpdateCtx): boolean {
+  return ctx.kind === 'command';
 }
 
 export function toTgUser(u: NonNullable<Message['from']>): TgUser {
@@ -135,7 +152,7 @@ export class Ingress {
   private readonly seenOrder: string[] = [];
   private readonly left = new Set<number>();
   private readonly groups = new Map<string, GroupBuf>();
-  private readonly chains = new Map<number, Promise<unknown>>();
+  private readonly chains = new Map<string, Promise<unknown>>(); // convKey(chat, topic) -> tail
   private readonly inflight = new Set<Promise<unknown>>();
 
   constructor(
@@ -148,6 +165,16 @@ export class Ingress {
     const msg = update.message;
     const chatKey =
       msg?.chat.id ?? update.callback_query?.message?.chat.id ?? update.stopped_message_generation?.chat.id ?? 0;
+    const topic = msg
+      ? topicOf(msg)
+      : update.callback_query
+        ? callbackTopic(update.callback_query)
+        : update.stopped_message_generation
+          ? (this.rt.turns.turnForDraft(chatKey, update.stopped_message_generation.draft_id)?.threadId ??
+            parseThreadId(update.stopped_message_generation.message_thread_id))
+          : undefined;
+    // Topics of one chat are independent conversations: a slow voice note in one must not hold up another.
+    const convId = convKey(chatKey, topic);
     const run = async () => {
       const attempts = await this.rt.store.beginUpdate(updateId).catch(() => 1);
       try {
@@ -163,14 +190,14 @@ export class Ingress {
       !!update.stopped_message_generation || (!!msg?.text && /^\/stop(@\w+)?(\s|$)/i.test(msg.text.trim()));
     // Stop must not wait behind a voice transcription / file download of the same chat,
     // and drafts must not come back while the runner winds down.
-    if (stopNow) this.rt.turns.disableDrafts(chatKey);
+    if (stopNow) this.rt.turns.disableDrafts(chatKey, topic);
     if (msg?.media_group_id || stopNow) p = run();
     else {
-      const prev = this.chains.get(chatKey) ?? Promise.resolve();
+      const prev = this.chains.get(convId) ?? Promise.resolve();
       p = prev.then(run);
-      this.chains.set(chatKey, p);
+      this.chains.set(convId, p);
       void p.finally(() => {
-        if (this.chains.get(chatKey) === p) this.chains.delete(chatKey);
+        if (this.chains.get(convId) === p) this.chains.delete(convId);
       });
     }
     this.inflight.add(p);
@@ -210,11 +237,11 @@ export class Ingress {
   replay(update: Update): Promise<void> {
     const msg = update.message as Msg | undefined;
     if (!msg) return Promise.resolve();
-    const chatKey = msg.chat.id;
-    const prev = this.chains.get(chatKey) ?? Promise.resolve();
+    const convId = convKey(msg.chat.id, topicOf(msg));
+    const prev = this.chains.get(convId) ?? Promise.resolve();
     const p = prev.then(() => this.onMessage(update, msg, true));
     this.chains.set(
-      chatKey,
+      convId,
       p.catch(() => undefined),
     );
     return p;
@@ -239,7 +266,7 @@ export class Ingress {
     const decision = await this.runGate(ctx);
     if (!decision) return;
     if (await this.runCommand(ctx)) return;
-    this.rt.turns.noteInbound(chatId, msg.message_id);
+    this.rt.turns.noteInbound(chatId, msg.message_id, topicOf(msg), { placeholder: !isUnhandledSlash(ctx) });
     await this.routeMessages([{ msg, ctx, patch: decision.patch }]);
   }
 
@@ -294,7 +321,7 @@ export class Ingress {
     buf.gateChain = next;
     const decision = await next;
     if (!decision) return;
-    this.rt.turns.noteInbound(ctx.chatId, msg.message_id);
+    this.rt.turns.noteInbound(ctx.chatId, msg.message_id, topicOf(msg));
     buf.items.push({ msg, ctx, patch: decision.patch });
     if (buf.timer) clearTimeout(buf.timer);
     buf.timer = setTimeout(() => {
@@ -327,13 +354,13 @@ export class Ingress {
   }
 
   private async reject(chatId: number, msgs: Msg[], text: string): Promise<void> {
-    for (const m of msgs) this.rt.turns.releaseInbound(chatId, m.message_id);
-    await this.replyTo(chatId, msgs[0]?.message_id, text);
+    for (const m of msgs) this.rt.turns.releaseInbound(chatId, m.message_id, topicOf(m));
+    await this.replyTo(chatId, msgs[0]?.message_id, text, topicOf(msgs[0]));
   }
 
-  private async replyTo(chatId: number, messageId: number | undefined, text: string): Promise<void> {
+  private async replyTo(chatId: number, messageId: number | undefined, text: string, threadId?: number): Promise<void> {
     await this.rt.sender
-      .sendMarkdown(chatId, text, { prio: 'product', replyTo: messageId })
+      .sendMarkdown(chatId, text, { prio: 'product', replyTo: messageId, threadId })
       .catch((err: unknown) => log.warn('reply failed', { err }));
   }
 
@@ -341,6 +368,7 @@ export class Ingress {
     const sorted = [...items].sort((a, b) => a.msg.message_id - b.msg.message_id);
     const first = sorted[0];
     const chatId = first.ctx.chatId;
+    const threadId = topicOf(first.msg);
     const msgs = sorted.map((i) => i.msg);
     const user = first.ctx.user;
     const attachments: Attachment[] = [];
@@ -370,11 +398,11 @@ export class Ingress {
       } catch (err) {
         if (!(err instanceof UserFacingError)) throw err;
         notes.push(COPY.notFetched(label, err.message === COPY.fileTooBig ? COPY.tooBigShort : COPY.failedShort));
-        await this.replyTo(chatId, m.message_id, err.message);
+        await this.replyTo(chatId, m.message_id, err.message, threadId);
       }
     };
 
-    const typing = setInterval(() => this.rt.turns.sendTyping(chatId), TYPING_REFRESH_MS);
+    const typing = setInterval(() => this.rt.turns.sendTyping(chatId, threadId), TYPING_REFRESH_MS);
     try {
       for (const m of msgs) {
         const fwd = forwardedFrom(m);
@@ -468,7 +496,7 @@ export class Ingress {
 
     if (!hasContent) {
       log.debug('inbound without text or attachments; ignored', { chatId });
-      for (const m of msgs) this.rt.turns.releaseInbound(chatId, m.message_id);
+      for (const m of msgs) this.rt.turns.releaseInbound(chatId, m.message_id, threadId);
       return;
     }
 
@@ -534,7 +562,7 @@ export class Ingress {
       `tg:${chatId}:${first.msg.message_id}`,
       String(content.text ?? ''),
     ).catch((err: unknown) => log.debug('retry prompt not saved', { err }));
-    await this.host.onInbound(platformId, null, {
+    await this.host.onInbound(platformId, threadId !== undefined ? String(threadId) : null, {
       id: `tg:${chatId}:${first.msg.message_id}`,
       kind: 'chat',
       content,
@@ -567,7 +595,7 @@ export class Ingress {
       }
       await this.answer(q);
       await this.rt.sender
-        .sendMarkdown(row.chat_id, row.markdown, { prio: 'product', longAsFile: true })
+        .sendMarkdown(row.chat_id, row.markdown, { prio: 'product', longAsFile: true, threadId: callbackTopic(q) })
         .catch((err: unknown) => log.warn('resend failed', { err }));
       return;
     }
@@ -575,7 +603,7 @@ export class Ingress {
       // [⏹ Остановить] under the status card; same path as the native Stop button.
       await this.answer(q);
       const draftId = Number(data.slice(7));
-      if (chat && Number.isFinite(draftId)) await this.stopDraft(chat.id, draftId);
+      if (chat && Number.isFinite(draftId)) await this.stopDraft(chat.id, draftId, callbackTopic(q));
       return;
     }
     if (data.startsWith('p:')) {
@@ -597,11 +625,13 @@ export class Ingress {
         return;
       }
       await this.answer(q, COPY.accepted);
-      this.rt.turns.noteQuestionAnswered(row.chat_id);
+      // The card sits in the topic whose session asked: the answer goes back to that session.
+      const topic = callbackTopic(q);
+      this.rt.turns.noteQuestionAnswered(row.chat_id, topic);
       this.host.onAction(row.question_id, row.value, `telegram:${q.from.id}`, {
         messageId: q.message ? String(q.message.message_id) : undefined,
         platformId: `telegram:${row.chat_id}`,
-        threadId: null,
+        threadId: topic !== undefined ? String(topic) : null,
       });
       return;
     }
@@ -624,12 +654,12 @@ export class Ingress {
   }
 
   private async onStopped(s: NonNullable<Update['stopped_message_generation']>): Promise<void> {
-    await this.stopDraft(s.chat.id, s.draft_id);
+    await this.stopDraft(s.chat.id, s.draft_id, parseThreadId(s.message_thread_id));
   }
 
-  private async stopDraft(chatId: number, draftId: number): Promise<void> {
+  private async stopDraft(chatId: number, draftId: number, topic?: number): Promise<void> {
     let target = this.rt.turns.turnForDraft(chatId, draftId);
-    this.rt.turns.disableDrafts(chatId);
+    this.rt.turns.disableDrafts(chatId, target ? target.threadId : topic);
     if (!target) {
       const row = await this.rt.store.getOpenDraft(chatId, draftId);
       if (row && row.chat_id === chatId) target = { sessionId: row.session_id, turnId: row.turn_id };

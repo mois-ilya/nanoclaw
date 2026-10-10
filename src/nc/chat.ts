@@ -10,17 +10,22 @@ import type { Session } from '../types.js';
 import { platformIdOf } from './config.js';
 import type { Tenant } from './store.js';
 
-/** The tenant's DM session (created on first use, like a routed message would). */
+/**
+ * The tenant's DM session for one conversation: a topic of the private chat (`threadId`) or, with null, the
+ * general one (created on first use, like a routed message would). DM wirings are per-thread, so every topic
+ * has its own session while sharing the agent group's memory and files.
+ */
 export async function dmSession(
   t: Pick<Tenant, 'tg_id' | 'agent_group_id'>,
   create = false,
+  threadId: string | null = null,
 ): Promise<Session | undefined> {
   if (!t.agent_group_id) return undefined;
   const mg = await getMessagingGroupByPlatform('telegram', platformIdOf(t.tg_id));
   if (!mg) return undefined;
-  if (create) return (await resolveSession(t.agent_group_id, mg.id, null, 'shared')).session;
+  if (create) return (await resolveSession(t.agent_group_id, mg.id, threadId, 'per-thread')).session;
   const { findSessionForAgent } = await import('../db/sessions.js');
-  return findSessionForAgent(t.agent_group_id, mg.id, null);
+  return findSessionForAgent(t.agent_group_id, mg.id, threadId);
 }
 
 /**
@@ -40,7 +45,8 @@ export async function injectChat(
     timestamp: new Date().toISOString(),
     platformId: platformIdOf(tgId),
     channelType: 'telegram',
-    threadId: null,
+    // The session's own topic, so the agent's reply lands where the conversation is.
+    threadId: session.thread_id ?? null,
     content: JSON.stringify({
       text,
       sender: opts.sender ?? 'nanoclaw',

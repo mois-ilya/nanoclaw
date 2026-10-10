@@ -101,7 +101,7 @@ describe('idle watchdog does not kill healthy silent turns', () => {
 
   it('an ask_question card pending for 6 minutes does not fail the turn; answering re-arms the clock', async () => {
     start();
-    await del.deliver(PLATFORM, null, {
+    const asked = del.deliver(PLATFORM, null, {
       kind: 'chat',
       content: {
         type: 'ask_question',
@@ -111,6 +111,8 @@ describe('idle watchdog does not kill healthy silent turns', () => {
         options: ['Да', 'Нет'],
       },
     });
+    await tick(1500); // the draft sent at turn start holds the spacing slot for a second
+    await asked;
     await tick(6 * 60_000);
     expect(rt.turns.hasActiveTurn(CHAT)).toBe(true);
     expect(api.of('sendRichMessage').filter((c) => J(c).includes('Что-то сломалось'))).toHaveLength(0);

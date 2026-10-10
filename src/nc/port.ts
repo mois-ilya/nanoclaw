@@ -61,7 +61,7 @@ export interface AdapterSend {
   sendProduct(
     chatId: number,
     md: string,
-    opts?: { buttons?: ProductButton[][]; silent?: boolean; replyTo?: number },
+    opts?: { buttons?: ProductButton[][]; silent?: boolean; replyTo?: number; threadId?: number },
   ): Promise<{ messageId: number }>;
   editProduct(chatId: number, messageId: number, md: string, opts?: { buttons?: ProductButton[][] }): Promise<void>;
   react(chatId: number, messageId: number, emoji: string | null): Promise<void>;
@@ -77,8 +77,13 @@ export interface AdapterSend {
   buttonValue?(chatId: number, shortId: string, kind: string): Promise<string | undefined>;
   /** Optional: remove the inline keyboard from a message. */
   clearButtons?(chatId: number, messageId: number): Promise<void>;
-  /** Optional: whether a turn is in flight for this private chat (live state of the adapter's turn manager). */
-  hasActiveTurn?(chatId: number): boolean | undefined;
+  /**
+   * Optional: whether a turn is in flight for this private chat's conversation (live state of the adapter's turn
+   * manager). `threadId` = the topic; omitted = the general conversation (messages outside any topic).
+   */
+  hasActiveTurn?(chatId: number, threadId?: number): boolean | undefined;
+  /** Optional: whether a turn is in flight anywhere in the chat (general or any topic). */
+  hasActiveTurnInChat?(chatId: number): boolean | undefined;
 }
 
 let send: AdapterSend | null = null;
@@ -119,8 +124,13 @@ export function canReplay(): boolean {
 }
 
 /** True/false when the adapter can tell, undefined when it cannot. */
-export function activeTurn(chatId: number): boolean | undefined {
-  return send?.hasActiveTurn?.(chatId);
+export function activeTurn(chatId: number, threadId?: number): boolean | undefined {
+  return send?.hasActiveTurn?.(chatId, threadId);
+}
+
+/** True/false when the adapter can tell: a turn is in flight in any conversation of the chat. */
+export function activeTurnInChat(chatId: number): boolean | undefined {
+  return send?.hasActiveTurnInChat ? send.hasActiveTurnInChat(chatId) : send?.hasActiveTurn?.(chatId);
 }
 
 export function adapterBound(): boolean {

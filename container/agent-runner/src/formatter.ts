@@ -18,6 +18,19 @@ export function isSessionEcho(msg: MessageInRow): boolean {
   return msg.channel_type === SESSION_ECHO_CHANNEL;
 }
 
+/** Id of a cross-session echo row (`<orig>:echo:<targetSession>`, see cross-session-context/fan.ts). */
+export function isEchoRowId(id: string): boolean {
+  return id.includes(':echo:');
+}
+
+/**
+ * Turn id of a batch = its first row that is not a cross-session echo (echoes ride along first as ambient
+ * context and belong to another conversation). Only an all-echo batch falls back to the first id.
+ */
+export function turnIdOfBatch(ids: string[]): string | undefined {
+  return ids.find((id) => !isEchoRowId(id)) ?? ids[0];
+}
+
 /**
  * Content flag the runner sets on its own failure notices. The host passes
  * a2a content through unchanged, so the flag reaches the receiving agent and

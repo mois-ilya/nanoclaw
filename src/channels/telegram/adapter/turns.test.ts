@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { TelegramError } from '../botapi/index.js';
 import { FakeApi } from './fakes.js';
 import { Deliverer } from './deliver.js';
 import { draftIdFor } from './format.js';
@@ -48,6 +49,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+const badRequest = () =>
+  new TelegramError({ method: 'sendMessageDraft', kind: 'bad_request', code: 400, description: 'drafts unsupported' });
+
 const start = (turnId = 'tg:42:7:ag') =>
   rt.turns.onTurn({ chatId: CHAT, turnId, sessionId: 'sess-1', state: 'started' });
 const step = (
@@ -60,23 +64,24 @@ const step = (
 ) => rt.turns.onProgress({ chatId: CHAT, turnId, sessionId: 'sess-1', seq, step: { id, label, state, ms } });
 
 describe('turn UX', () => {
-  it('inbound: 👀 reaction and typing immediately', async () => {
+  it('inbound: «Thinking…» placeholder (no 👀) and typing immediately', async () => {
     rt.turns.noteInbound(CHAT, 7);
     await tick(0);
-    expect(api.of('setMessageReaction')[0].params).toMatchObject({
+    expect(api.of('sendMessageDraft')[0].params).toEqual({
       chat_id: CHAT,
-      message_id: 7,
-      reaction: [{ type: 'emoji', emoji: '👀' }],
+      draft_id: draftIdFor('tg:42:7'),
+      text: '',
     });
+    expect(api.of('setMessageReaction')).toHaveLength(0);
     expect(api.of('sendChatAction')[0].params).toMatchObject({ chat_id: CHAT, action: 'typing' });
   });
 
-  it('no draft for a fast turn; setTyping is skipped only once a draft is active', async () => {
+  it('the rich draft shows the moment the turn starts; setTyping is skipped once a draft is active', async () => {
     rt.turns.noteInbound(CHAT, 7);
-    start();
-    await tick(2000);
+    await tick(0);
     expect(api.of('sendRichMessageDraft')).toHaveLength(0);
-    await tick(600);
+    start();
+    await tick(0);
     expect(api.of('sendRichMessageDraft')).toHaveLength(1);
     const before = api.of('sendChatAction').length;
     rt.turns.sendTyping(CHAT);
@@ -84,19 +89,21 @@ describe('turn UX', () => {
     expect(api.of('sendChatAction')).toHaveLength(before);
   });
 
-  it('draft after 2.5 s: stable draft_id, can_stop, header + checklist + divider + preview; throttled; heartbeat', async () => {
+  it('draft at turn start: stable draft_id, can_stop, header + checklist + divider + preview; throttled; heartbeat', async () => {
     rt.turns.noteInbound(CHAT, 7);
     start();
     step(1, 's1', 'Открываю страницу habr.com', 'done', 1200);
     step(2, 's2', 'Читаю notes.md', 'running');
     await tick(2500);
     const drafts = () => api.of('sendRichMessageDraft');
-    expect(drafts()).toHaveLength(1);
-    const p = drafts()[0].params;
-    expect(p.draft_id).toBe(draftIdFor('tg:42:7:ag'));
+    // the first draft goes out at turn start; the step events refresh it within the throttle window
+    expect(drafts().length).toBeGreaterThanOrEqual(1);
+    const base = drafts().length;
+    const p = drafts()[base - 1].params;
+    expect(p.draft_id).toBe(draftIdFor('tg:42:7'));
     expect(p.can_stop).toBe(true);
-    const s = text(drafts()[0]);
-    expect(s).toContain('Работаю · 0:02');
+    const s = text(drafts()[base - 1]);
+    expect(s).toContain('Работаю · 0:0');
     expect(s).toContain('✅ Открываю страницу habr.com');
     expect(s).toContain('⏳ Читаю notes.md');
 
@@ -113,8 +120,8 @@ describe('turn UX', () => {
     }
     await tick(2000);
     const n = drafts().length;
-    expect(n).toBeGreaterThanOrEqual(2);
-    expect(n).toBeLessThanOrEqual(4);
+    expect(n - base).toBeGreaterThanOrEqual(2);
+    expect(n - base).toBeLessThanOrEqual(4);
     const last = text(drafts()[n - 1]);
     expect(last).toContain('Ответ часть 10');
     expect(last).toContain('divider');
@@ -133,9 +140,13 @@ describe('turn UX', () => {
 
   it('draft persisted for the stop button and mapped back to the turn', async () => {
     start();
-    await tick(2600);
-    const id = draftIdFor('tg:42:7:ag');
-    expect(rt.turns.turnForDraft(CHAT, id)).toEqual({ sessionId: 'sess-1', turnId: 'tg:42:7:ag' });
+    await tick(100);
+    const id = draftIdFor('tg:42:7');
+    expect(rt.turns.turnForDraft(CHAT, id)).toEqual({
+      sessionId: 'sess-1',
+      turnId: 'tg:42:7:ag',
+      threadId: undefined,
+    });
     expect(await store.getOpenDraft(CHAT, id)).toMatchObject({ session_id: 'sess-1', turn_id: 'tg:42:7:ag' });
   });
 
@@ -144,8 +155,9 @@ describe('turn UX', () => {
     rt.turns.onPreview({ chatId: CHAT, turnId: 'tg:42:7:ag', sessionId: 's', seq: 5, text: 'новый' });
     rt.turns.onPreview({ chatId: CHAT, turnId: 'tg:42:7:ag', sessionId: 's', seq: 3, text: 'старый' });
     await tick(2600);
-    expect(text(api.of('sendRichMessageDraft')[0])).toContain('новый');
-    expect(text(api.of('sendRichMessageDraft')[0])).not.toContain('старый');
+    const lastDraft = () => api.of('sendRichMessageDraft').pop()!;
+    expect(text(lastDraft())).toContain('новый');
+    expect(text(lastDraft())).not.toContain('старый');
     rt.turns.onTurn({ chatId: CHAT, turnId: 'tg:42:7:ag', sessionId: 's', state: 'finished' });
     const n = api.of('sendRichMessageDraft').length;
     rt.turns.onPreview({ chatId: CHAT, turnId: 'tg:42:7:ag', sessionId: 's', seq: 9, text: 'поздно' });
@@ -188,7 +200,10 @@ describe('turn UX', () => {
   });
 
   it('final: details block (>=3 steps), 👀 cleared, draft dropped, card closed', async () => {
+    // drafts unsupported -> the placeholder falls back to the 👀 acknowledgement
+    api.failNext('sendMessageDraft', badRequest());
     rt.turns.noteInbound(CHAT, 7);
+    await tick(0);
     start();
     step(1, 'a', 'Открываю страницу habr.com', 'done', 3000);
     step(2, 'b', 'Читаю a.md', 'done', 1000);
@@ -256,7 +271,9 @@ describe('turn UX', () => {
   });
 
   it('cancelled: drafts stop, 👀 cleared, card → «Остановлено»', async () => {
+    api.failNext('sendMessageDraft', badRequest());
     rt.turns.noteInbound(CHAT, 7);
+    await tick(0);
     start();
     await tick(46_000);
     expect(api.of('sendRichMessage')).toHaveLength(1);

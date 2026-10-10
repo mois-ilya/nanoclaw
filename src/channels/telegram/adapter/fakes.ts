@@ -44,6 +44,9 @@ export class FakeApi {
   sendRichMessageDraft(p: unknown) {
     return this.rec('sendRichMessageDraft', p, true as const);
   }
+  sendMessageDraft(p: unknown) {
+    return this.rec('sendMessageDraft', p, true as const);
+  }
   editMessageText(p: unknown) {
     return this.rec('editMessageText', p, true as const);
   }

@@ -6,7 +6,15 @@ import type { OutboundFile, OutboundMessage } from '../../adapter.js';
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../ask-question.js';
 import { resolveQuestionRender } from '../../question-render-registry.js';
 import { COPY } from './copy.js';
-import { baseTurnId, chatIdFromPlatformId, classifyFailure, escapeMd, shortId } from './format.js';
+import {
+  baseTurnId,
+  chatIdFromPlatformId,
+  classifyFailure,
+  escapeMd,
+  parseThreadId,
+  shortId,
+  threadParam,
+} from './format.js';
 import { CALLBACK_TTL_MS, type VoiceEcho } from './store.js';
 import {
   deliveryKey,
@@ -125,7 +133,7 @@ export class Deliverer {
   private readonly attempts = new Map<string, Attempt>();
 
   constructor(private readonly rt: TelegramRuntime) {
-    rt.turns.setFileSender((chatId, files) => this.sendQueuedFiles(chatId, files));
+    rt.turns.setFileSender((chatId, files, threadId) => this.sendQueuedFiles(chatId, files, threadId));
   }
 
   private kb(rows: ProductButton[][]): InlineKeyboardMarkup | undefined {
@@ -145,27 +153,30 @@ export class Deliverer {
     }
   }
 
-  async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
+  async deliver(platformId: string, rawThreadId: string | null, message: OutboundMessage): Promise<string | undefined> {
     const chatId = chatIdFromPlatformId(platformId);
     if (chatId === null) throw new Error(`telegram: bad platform id ${platformId}`);
+    // A private-chat topic; reserved ids ('system:…', 'task:…') are not Telegram threads.
+    const threadId = parseThreadId(rawThreadId);
     const c = (message.content ?? {}) as Content;
     try {
       if (await this.rt.store.isBlocked(chatId)) {
         log.info('Skipping delivery: chat blocked the bot', { chatId });
-        this.rt.turns.endFinal({ chatId, elapsedMs: 0 });
+        this.rt.turns.endFinal({ chatId, threadId, elapsedMs: 0 });
         return undefined;
       }
       if (c.operation === 'edit' && c.messageId !== undefined) return await this.edit(chatId, c);
       if (c.operation === 'reaction' && c.messageId !== undefined && typeof c.emoji === 'string') {
         return await this.reaction(chatId, c);
       }
-      if (c.type === 'ask_question' && c.questionId && Array.isArray(c.options)) return await this.ask(chatId, c);
-      if (c.type === 'card' && c.card) return await this.card(chatId, c);
-      return await this.chat(chatId, c, message.files);
+      if (c.type === 'ask_question' && c.questionId && Array.isArray(c.options))
+        return await this.ask(chatId, threadId, c);
+      if (c.type === 'card' && c.card) return await this.card(chatId, threadId, c);
+      return await this.chat(chatId, threadId, c, message.files);
     } catch (e) {
       if (isForbidden(e)) {
         this.rt.markBlocked(chatId, true);
-        this.rt.turns.endFinal({ chatId, elapsedMs: 0 });
+        this.rt.turns.endFinal({ chatId, threadId, elapsedMs: 0 });
         return undefined;
       }
       throw e;
@@ -226,7 +237,7 @@ export class Deliverer {
 
   // ---- ask_question ------------------------------------------------------
 
-  private async ask(chatId: number, c: Content): Promise<string | undefined> {
+  private async ask(chatId: number, threadId: number | undefined, c: Content): Promise<string | undefined> {
     const questionId = String(c.questionId);
     const render = await resolveQuestionRender(questionId).catch(() => undefined);
     if (c.requirePresentation === true && !render) {
@@ -267,15 +278,19 @@ export class Deliverer {
       else rows.push([btn]);
     }
     const md = [title ? `**${escapeMd(title)}**` : '', question].filter(Boolean).join('\n\n');
-    const ids = await this.rt.sender.sendMarkdown(chatId, md, { prio: 'product', markup: { inline_keyboard: rows } });
+    const ids = await this.rt.sender.sendMarkdown(chatId, md, {
+      prio: 'product',
+      threadId,
+      markup: { inline_keyboard: rows },
+    });
     // The runner stays silent until the answer arrives: the idle watchdog must not call that a dead turn.
-    this.rt.turns.noteQuestion(chatId);
+    this.rt.turns.noteQuestion(chatId, threadId);
     return ids.find((i) => i > 0)?.toString();
   }
 
   // ---- card --------------------------------------------------------------
 
-  private async card(chatId: number, c: Content): Promise<string | undefined> {
+  private async card(chatId: number, threadId: number | undefined, c: Content): Promise<string | undefined> {
     const card = c.card as {
       title?: string;
       description?: string;
@@ -296,6 +311,7 @@ export class Deliverer {
     if (!md.trim()) return undefined;
     const ids = await this.rt.sender.sendMarkdown(chatId, md, {
       prio: 'product',
+      threadId,
       markup: buttons.length ? { inline_keyboard: buttons } : undefined,
     });
     return ids.find((i) => i > 0)?.toString();
@@ -314,7 +330,12 @@ export class Deliverer {
     for (const [k, a] of this.attempts) if (now - a.at > ATTEMPT_TTL_MS) this.attempts.delete(k);
   }
 
-  private async chat(chatId: number, c: Content, files: OutboundFile[] | undefined): Promise<string | undefined> {
+  private async chat(
+    chatId: number,
+    threadId: number | undefined,
+    c: Content,
+    files: OutboundFile[] | undefined,
+  ): Promise<string | undefined> {
     const nc = (c.nc && typeof c.nc === 'object' ? c.nc : {}) as NcMeta;
     const rawText = typeof c.markdown === 'string' ? c.markdown : typeof c.text === 'string' ? c.text : '';
     const failure = c.failureNotice === true;
@@ -328,7 +349,7 @@ export class Deliverer {
     const now = Date.now();
     this.cleanAttempts(now);
     // Retries of the same row must not resend parts that already went out.
-    const key = deliveryKey(chatId, { c, files: files?.map((f) => [f.filename, f.data.length]) });
+    const key = deliveryKey(chatId, { c, threadId, files: files?.map((f) => [f.filename, f.data.length]) });
     let attempt = this.attempts.get(key);
     if (!attempt) {
       attempt = { at: now, progress: { ids: [] }, filesSent: 0 };
@@ -336,7 +357,7 @@ export class Deliverer {
     }
 
     const turns = this.rt.turns;
-    const active = turns.activeTurn(chatId);
+    const active = turns.activeTurn(chatId, threadId);
     const linked = !!active && !task && (!nc.turnId || baseTurnId(nc.turnId) === baseTurnId(active.turnId));
     const standalone = task || (!!active && !linked);
     const terminal = failure || stopped || nc.final === true;
@@ -344,10 +365,10 @@ export class Deliverer {
     const turn = linked ? active : undefined;
 
     const ctx = standalone
-      ? { chatId, elapsedMs: 0, silent: undefined as boolean | undefined }
+      ? { chatId, threadId, elapsedMs: 0, silent: undefined as boolean | undefined }
       : interim && turn
-        ? { chatId, turn, elapsedMs: now - turn.startedAt, silent: undefined as boolean | undefined }
-        : await turns.beginFinal(chatId, { failure: failure || stopped });
+        ? { chatId, threadId, turn, elapsedMs: now - turn.startedAt, silent: undefined as boolean | undefined }
+        : await turns.beginFinal(chatId, { failure: failure || stopped, threadId });
     const withTurn = !standalone && !!turn;
     if (standalone || !active) {
       // Scheduled/proactive output: quiet hours mean «без звука».
@@ -396,6 +417,7 @@ export class Deliverer {
       await this.retrying(() =>
         this.rt.sender.sendMarkdown(chatId, text, {
           prio: 'final',
+          threadId,
           silent: ctx.silent,
           markup,
           // One row that renders to many parts becomes a short summary + answer.md, interim or not.
@@ -408,14 +430,14 @@ export class Deliverer {
           progress: attempt.progress,
         }),
       );
-      if (!failure && attempt.progress.ids.includes(0)) await this.offerResend(chatId, text);
+      if (!failure && attempt.progress.ids.includes(0)) await this.offerResend(chatId, threadId, text);
     }
 
     if (interim && turn) {
       // The answer text goes first, its files right after it, before this row is acknowledged: a restart or a
       // send failure then leaves the row retryable instead of losing an already-acked file.
       for (let i = attempt.filesSent; i < own.length; i++) {
-        await this.retrying(() => this.sendFile(chatId, own[i], caption));
+        await this.retrying(() => this.sendFile(chatId, threadId, own[i], caption));
         attempt.filesSent = i + 1;
       }
       let out: LastOut | undefined;
@@ -429,7 +451,7 @@ export class Deliverer {
     const queued: PendingFile[] = turn ? turn.pendingFiles : [];
     const all: PendingFile[] = [...queued, ...own.map((f) => ({ ...f, caption }))];
     for (let i = attempt.filesSent; i < all.length; i++) {
-      await this.retrying(() => this.sendFile(chatId, all[i], all[i].caption));
+      await this.retrying(() => this.sendFile(chatId, threadId, all[i], all[i].caption));
       attempt.filesSent = i + 1;
     }
     if (turn) turn.pendingFiles = [];
@@ -499,12 +521,13 @@ export class Deliverer {
   }
 
   /** The outcome of the final is unknown (timeout/5xx): keep the text and offer to show it again. */
-  private async offerResend(chatId: number, md: string): Promise<void> {
+  private async offerResend(chatId: number, threadId: number | undefined, md: string): Promise<void> {
     const id = shortId();
     try {
       await this.rt.store.saveFinal({ id, chat_id: chatId, markdown: md, created_at: Date.now() });
       await this.rt.sender.sendMarkdown(chatId, COPY.resendNotice, {
         prio: 'product',
+        threadId,
         markup: this.kb([[{ text: COPY.resendBtn, data: `p:rs:${id}` }]]),
       });
     } catch (err) {
@@ -512,20 +535,25 @@ export class Deliverer {
     }
   }
 
-  private async sendQueuedFiles(chatId: number, files: PendingFile[]): Promise<void> {
+  private async sendQueuedFiles(chatId: number, files: PendingFile[], threadId?: number): Promise<void> {
     for (const f of files) {
       try {
-        await this.retrying(() => this.sendFile(chatId, f, f.caption));
+        await this.retrying(() => this.sendFile(chatId, threadId, f, f.caption));
       } catch (err) {
         log.warn('queued file send failed', { chatId, file: f.filename, err });
       }
     }
   }
 
-  private async sendFile(chatId: number, f: OutboundFile, caption?: string): Promise<void> {
+  private async sendFile(
+    chatId: number,
+    threadId: number | undefined,
+    f: OutboundFile,
+    caption?: string,
+  ): Promise<void> {
     const size = f.data.length;
     if (size > DOC_MAX) {
-      await this.rt.sender.sendMarkdown(chatId, COPY.fileTooBigOut(f.filename), { prio: 'final' });
+      await this.rt.sender.sendMarkdown(chatId, COPY.fileTooBigOut(f.filename), { prio: 'final', threadId });
       return;
     }
     const file = new InputFile(f.data, f.filename);
@@ -535,7 +563,8 @@ export class Deliverer {
     const cap = caption ? { caption: caption.slice(0, 1024) } : {};
     const run = async (kind: 'photo' | 'document') => {
       const action = kind === 'photo' ? 'upload_photo' : 'upload_document';
-      const ping = () => void this.rt.api.sendChatAction({ chat_id: chatId, action }).catch(() => undefined);
+      const ping = () =>
+        void this.rt.api.sendChatAction({ chat_id: chatId, ...threadParam(threadId), action }).catch(() => undefined);
       ping();
       const timer = setInterval(ping, UPLOAD_ACTION_MS);
       try {
@@ -546,8 +575,14 @@ export class Deliverer {
           try {
             await this.rt.sched.enqueue(chatId, { prio: 'final' }, () =>
               kind === 'photo'
-                ? this.rt.api.sendPhoto({ chat_id: chatId, photo: file, ...cap }, { timeoutMs: t })
-                : this.rt.api.sendDocument({ chat_id: chatId, document: file, ...cap }, { timeoutMs: t }),
+                ? this.rt.api.sendPhoto(
+                    { chat_id: chatId, ...threadParam(threadId), photo: file, ...cap },
+                    { timeoutMs: t },
+                  )
+                : this.rt.api.sendDocument(
+                    { chat_id: chatId, ...threadParam(threadId), document: file, ...cap },
+                    { timeoutMs: t },
+                  ),
             );
             return;
           } catch (e) {
@@ -559,7 +594,7 @@ export class Deliverer {
             if (e.kind === 'timeout') {
               log.warn('file upload timed out twice; asking the user to check', { chatId, kind });
               await this.rt.sender
-                .sendMarkdown(chatId, COPY.fileMaybeLost(f.filename), { prio: 'final' })
+                .sendMarkdown(chatId, COPY.fileMaybeLost(f.filename), { prio: 'final', threadId })
                 .catch((err: unknown) => log.warn('file notice failed', { err }));
               return;
             }

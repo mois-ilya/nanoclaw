@@ -59,6 +59,13 @@ describe('private gate', () => {
     expect((await takeRetained(FRIEND_A)).length).toBe(1);
   });
 
+  it('the gate answers inside the topic the message came from', async () => {
+    const c = ctx(FRIEND_A, 'привет');
+    c.message = { ...c.message!, message_thread_id: 7, is_topic_message: true } as never;
+    await privateGate(c);
+    expect(fake.sent.filter((s) => s.chatId === FRIEND_A).map((s) => s.threadId)).toEqual([7]);
+  });
+
   it('pending: repeated messages are retained (max 5) with at most one reply per 24h', async () => {
     await privateGate(ctx(FRIEND_A, 'один'));
     for (let i = 0; i < 7; i++) expect((await privateGate(ctx(FRIEND_A, `m${i}`))).action).toBe('handled');

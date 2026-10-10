@@ -1,14 +1,27 @@
 /**
- * Turn UX (contract C4): 👀 reaction + typing on accept, a draft after 2.5 s,
- * a silent status card after 45 s, the final with «Что я сделал», then the
- * cleanup (reaction off, card → «Готово», draft dropped). Everything leaves
- * through the per-chat scheduler, so ordering and rate limits are one policy.
+ * Turn UX (contract C4): the native «Thinking…» placeholder (or 👀 when it is not possible) + typing on accept,
+ * the rich draft the moment the turn starts, a silent status card after 45 s, the final with «Что я сделал», then
+ * the cleanup (reaction off, card → «Готово», draft dropped). Everything leaves through the per-chat scheduler, so
+ * ordering and rate limits are one policy.
+ *
+ * Turns are keyed by conversation = (chat, topic): topics of a private chat run in parallel, messages outside
+ * any topic are the chat's «general» conversation (threadId undefined).
  */
 import { TelegramError, type BotApi, type InputRichBlock, type InputRichMessage } from '../botapi/index.js';
 import { appendDetails, renderStreamingPreview } from '../render/index.js';
 import { log } from '../../../log.js';
 import { COPY } from './copy.js';
-import { baseTurnId, draftIdFor, escapeMd, fmtClock, fmtDuration, messageIdFromTurnId, stepsWord } from './format.js';
+import {
+  baseTurnId,
+  convKey,
+  escapeMd,
+  fmtClock,
+  fmtDuration,
+  messageIdFromTurnId,
+  stepsWord,
+  threadParam,
+  turnDraftId,
+} from './format.js';
 import type { BudgetNoteView, UserPrefsView } from './hooks.js';
 import { isForbidden, type ProductButton, type Sender } from './sender.js';
 import type { Scheduler } from './scheduler.js';
@@ -18,7 +31,12 @@ import type { InlineKeyboardMarkup } from '../botapi/index.js';
 export interface TurnConfig {
   /** NC_STOP_ENABLED=1: show the native Stop button on drafts. */
   stopEnabled: boolean;
+  /** 0 = the rich draft goes out the moment the turn starts (it replaces the «Thinking…» placeholder). */
   draftDelayMs: number;
+  /** The placeholder draft expires after ~30 s: it is re-sent this often until the turn starts. */
+  placeholderRefreshMs: number;
+  /** Give up on the placeholder (turn never started, e.g. a filtered command) after this long. */
+  placeholderMaxMs: number;
   draftThrottleMs: number;
   heartbeatMs: number;
   statusDelayMs: number;
@@ -37,7 +55,9 @@ export interface TurnConfig {
 
 export const DEFAULT_TURN_CONFIG: TurnConfig = {
   stopEnabled: false,
-  draftDelayMs: 2500,
+  draftDelayMs: 0,
+  placeholderRefreshMs: 20_000,
+  placeholderMaxMs: 2 * 60_000,
   draftThrottleMs: 700,
   heartbeatMs: 15_000,
   statusDelayMs: 45_000,
@@ -77,6 +97,8 @@ export interface LastOut {
 
 export interface Turn {
   chatId: number;
+  /** Private-chat topic (`message_thread_id`); undefined = the general conversation. */
+  threadId?: number;
   turnId: string;
   sessionId: string;
   startedAt: number;
@@ -119,6 +141,7 @@ export interface Turn {
 
 export interface FinalContext {
   chatId: number;
+  threadId?: number;
   turn?: Turn;
   elapsedMs: number;
   silent?: boolean;
@@ -138,7 +161,7 @@ export interface TurnDeps {
   buildKeyboard?: (rows: ProductButton[][]) => InlineKeyboardMarkup | undefined;
 }
 
-export type FileSender = (chatId: number, files: PendingFile[]) => Promise<void>;
+export type FileSender = (chatId: number, files: PendingFile[], threadId?: number) => Promise<void>;
 
 /** «🎤 Расшифровка: «…»» block(s) for the top of the reply (ux §2.4). */
 export function echoBlocks(echoes: VoiceEcho[]): InputRichBlock[] {
@@ -154,10 +177,31 @@ export function echoBlocks(echoes: VoiceEcho[]): InputRichBlock[] {
 const FINISHED_MEMORY = 300;
 const ACK_TTL_MS = 30 * 60 * 1000;
 
+/** «Thinking…» draft shown from the accepted inbound message until its turn starts. */
+interface Placeholder {
+  chatId: number;
+  threadId?: number;
+  /** The user message it answers. */
+  messageId: number;
+  draftId: number;
+  startedAt: number;
+  /** Telegram accepted the first draft (a later failure no longer falls back to 👀). */
+  confirmed: boolean;
+  /** Why it stopped: the turn took over ('start') or the conversation moved on (final, stop, failure, cap). */
+  ended?: 'start' | 'end';
+  timer?: ReturnType<typeof setInterval>;
+}
+
+interface Ack {
+  at: number;
+  threadId?: number;
+}
+
 export class TurnManager {
   private readonly cfg: TurnConfig;
-  private readonly active = new Map<number, Turn>();
-  private readonly acks = new Map<number, Map<number, number>>(); // chat -> messageId -> at
+  private readonly active = new Map<string, Turn>(); // convKey(chat, thread) -> open turn
+  private readonly acks = new Map<number, Map<number, Ack>>(); // chat -> messageId -> 👀 ack
+  private readonly placeholders = new Map<string, Placeholder>(); // convKey -> «Thinking…» draft
   private readonly finished: string[] = [];
   private readonly finishedSet = new Set<string>();
   private readonly voices = new Map<string, VoiceEcho[]>();
@@ -196,30 +240,43 @@ export class TurnManager {
     return (await this.d.store.takeVoice(t.chatId, mid).catch(() => undefined)) ?? [];
   }
 
-  activeTurn(chatId: number): Turn | undefined {
-    const t = this.active.get(chatId);
+  /** Scheduler key of a coalescing task: one per conversation, so topics never replace each other's drafts. */
+  private sk(base: string, threadId: number | undefined): string {
+    return threadId === undefined ? base : `${base}#${threadId}`;
+  }
+
+  activeTurn(chatId: number, threadId?: number): Turn | undefined {
+    const t = this.active.get(convKey(chatId, threadId));
     return t && !t.closed ? t : undefined;
   }
 
-  hasActiveTurn(chatId: number): boolean {
-    return !!this.activeTurn(chatId);
+  hasActiveTurn(chatId: number, threadId?: number): boolean {
+    return !!this.activeTurn(chatId, threadId);
+  }
+
+  /** A turn is open anywhere in the chat (general or any topic). */
+  hasActiveTurnInChat(chatId: number): boolean {
+    for (const t of this.active.values()) if (t.chatId === chatId && !t.closed) return true;
+    return false;
   }
 
   /** Stop was requested: drafts must not come back while the runner winds down. */
-  disableDrafts(chatId: number): void {
-    const t = this.active.get(chatId);
+  disableDrafts(chatId: number, threadId?: number): void {
+    this.cancelPlaceholder(chatId, threadId);
+    const t = this.active.get(convKey(chatId, threadId));
     if (!t || t.closed) return;
     t.draftsDisabled = true;
     for (const timer of [t.draftStartTimer, t.draftTimer, t.heartbeatTimer]) if (timer) clearTimeout(timer);
     t.draftStartTimer = t.draftTimer = t.heartbeatTimer = undefined;
-    this.d.sched.cancel(chatId, 'draft');
+    this.d.sched.cancel(chatId, this.sk('draft', threadId));
   }
 
   /** The agent reacted to this user message itself (👍 = silent action done): keep it. */
   noteAgentReaction(chatId: number, messageId: number): void {
     this.acks.get(chatId)?.delete(messageId);
-    const t = this.active.get(chatId);
-    if (t) t.ackIds = t.ackIds.filter((id) => id !== messageId);
+    for (const t of this.active.values()) {
+      if (t.chatId === chatId) t.ackIds = t.ackIds.filter((id) => id !== messageId);
+    }
   }
 
   /** The container of this session is gone (exit, OOM, kill, pause): fail its open turn at once. */
@@ -257,31 +314,44 @@ export class TurnManager {
   }
 
   /** An ask_user_question card went out: the runner is silent until the user answers — not a dead turn. */
-  noteQuestion(chatId: number): void {
-    const t = this.active.get(chatId);
+  noteQuestion(chatId: number, threadId?: number): void {
+    const t = this.active.get(convKey(chatId, threadId));
     if (!t || t.closed) return;
     t.questionSince = Date.now();
     this.armIdle(t);
   }
 
   /** The user answered the card (or it was resolved): the idle clock runs normally again. */
-  noteQuestionAnswered(chatId: number): void {
-    const t = this.active.get(chatId);
+  noteQuestionAnswered(chatId: number, threadId?: number): void {
+    const t = this.active.get(convKey(chatId, threadId));
     if (!t || t.closed) return;
     t.questionSince = undefined;
     this.armIdle(t);
   }
 
-  /** 👀 + typing immediately; both skip the spacing so the user sees life at once. */
-  noteInbound(chatId: number, messageId: number): void {
+  /**
+   * Accepted inbound message: the native «Thinking…» placeholder + typing, immediately. Falls back to 👀 when the
+   * placeholder is rejected, and uses 👀 for a message that arrives while the conversation already shows a running
+   * draft / placeholder. Both skip the spacing so the user sees life at once.
+   */
+  noteInbound(chatId: number, messageId: number, threadId?: number, opts: { placeholder?: boolean } = {}): void {
+    const key = convKey(chatId, threadId);
+    if (opts.placeholder !== false && !this.hasActiveTurn(chatId, threadId) && !this.placeholders.has(key))
+      this.startPlaceholder(chatId, threadId, messageId);
+    else this.react(chatId, messageId, threadId);
+    this.sendTyping(chatId, threadId);
+  }
+
+  /** 👀 on a user message; remembered so the turn clears it. */
+  private react(chatId: number, messageId: number, threadId?: number): void {
     const now = Date.now();
     let m = this.acks.get(chatId);
     if (!m) {
       m = new Map();
       this.acks.set(chatId, m);
     }
-    for (const [id, at] of m) if (now - at > ACK_TTL_MS) m.delete(id);
-    m.set(messageId, now);
+    for (const [id, a] of m) if (now - a.at > ACK_TTL_MS) m.delete(id);
+    m.set(messageId, { at: now, threadId });
     this.fire(
       this.d.sched.enqueue(chatId, { prio: 'final', spaced: false }, () =>
         this.d.api.setMessageReaction({
@@ -293,25 +363,105 @@ export class TurnManager {
       'ack reaction',
       chatId,
     );
-    this.sendTyping(chatId);
+  }
+
+  private startPlaceholder(chatId: number, threadId: number | undefined, messageId: number): void {
+    const key = convKey(chatId, threadId);
+    const ph: Placeholder = {
+      chatId,
+      threadId,
+      messageId,
+      draftId: turnDraftId(`tg:${chatId}:${messageId}`),
+      startedAt: Date.now(),
+      confirmed: false,
+    };
+    this.placeholders.set(key, ph);
+    ph.timer = setInterval(() => {
+      if (this.placeholders.get(key) !== ph) return;
+      if (Date.now() - ph.startedAt + this.cfg.placeholderRefreshMs > this.cfg.placeholderMaxMs) {
+        this.cancelPlaceholder(chatId, threadId);
+        return;
+      }
+      this.sendPlaceholder(ph);
+    }, this.cfg.placeholderRefreshMs);
+    ph.timer.unref?.();
+    this.sendPlaceholder(ph);
+  }
+
+  private sendPlaceholder(ph: Placeholder): void {
+    const key = convKey(ph.chatId, ph.threadId);
+    const p = this.d.sched.enqueue(
+      ph.chatId,
+      { prio: 'final', spaced: false, key: this.sk('placeholder', ph.threadId), maxRateRetries: 1 },
+      async () => {
+        if (this.placeholders.get(key) !== ph) return;
+        await this.d.api.sendMessageDraft({
+          chat_id: ph.chatId,
+          ...threadParam(ph.threadId),
+          draft_id: ph.draftId,
+          text: '',
+        });
+        ph.confirmed = true;
+      },
+    );
+    p.catch((err: unknown) => {
+      // A failure that lands after the turn took over still needs the 👀 (the turn clears it on close).
+      const tookOver = ph.ended === 'start' && !!this.activeTurn(ph.chatId, ph.threadId);
+      if (this.placeholders.get(key) !== ph && !tookOver) return;
+      const drop = () => {
+        if (this.placeholders.get(key) === ph) this.cancelPlaceholder(ph.chatId, ph.threadId);
+      };
+      if (isForbidden(err)) {
+        this.d.onForbidden?.(ph.chatId);
+        drop();
+        return;
+      }
+      if (!ph.confirmed) {
+        // Drafts unsupported / rejected: the old acknowledgement.
+        log.debug('Placeholder draft failed; falling back to 👀', { chatId: ph.chatId, err });
+        drop();
+        this.react(ph.chatId, ph.messageId, ph.threadId);
+        this.activeTurn(ph.chatId, ph.threadId)?.ackIds.push(ph.messageId);
+        return;
+      }
+      if (err instanceof TelegramError && err.kind === 'bad_request') drop();
+      else log.debug('Placeholder refresh failed', { chatId: ph.chatId, err });
+    });
+  }
+
+  /** Stop refreshing the placeholder (turn started, final delivered, failed, stopped, capped). */
+  private cancelPlaceholder(chatId: number, threadId?: number, why: 'start' | 'end' = 'end'): Placeholder | undefined {
+    const key = convKey(chatId, threadId);
+    const ph = this.placeholders.get(key);
+    if (!ph) return undefined;
+    ph.ended = why;
+    if (ph.timer) clearInterval(ph.timer);
+    this.placeholders.delete(key);
+    this.d.sched.cancel(chatId, this.sk('placeholder', threadId));
+    return ph;
   }
 
   /** Clear the 👀 of a message without waiting for a turn (e.g. media rejected). */
-  releaseInbound(chatId: number, messageId: number): void {
+  releaseInbound(chatId: number, messageId: number, threadId?: number): void {
     this.acks.get(chatId)?.delete(messageId);
+    const ph = this.placeholders.get(convKey(chatId, threadId));
+    if (ph && ph.messageId === messageId) {
+      this.cancelPlaceholder(chatId, threadId);
+      return; // no reaction was ever put on it
+    }
     this.clearReactions(chatId, [messageId]);
   }
 
-  hasActiveDraft(chatId: number): boolean {
-    const t = this.active.get(chatId);
+  hasActiveDraft(chatId: number, threadId?: number): boolean {
+    const t = this.active.get(convKey(chatId, threadId));
     return !!t && !t.closed && t.draftActive;
   }
 
-  sendTyping(chatId: number): void {
-    if (this.hasActiveDraft(chatId)) return;
+  sendTyping(chatId: number, threadId?: number): void {
+    if (this.hasActiveDraft(chatId, threadId)) return;
     this.fire(
-      this.d.sched.enqueue(chatId, { prio: 'draft', spaced: false, key: 'typing' }, () =>
-        this.d.api.sendChatAction({ chat_id: chatId, action: 'typing' }),
+      this.d.sched.enqueue(chatId, { prio: 'draft', spaced: false, key: this.sk('typing', threadId) }, () =>
+        this.d.api.sendChatAction({ chat_id: chatId, ...threadParam(threadId), action: 'typing' }),
       ),
       'typing',
       chatId,
@@ -322,30 +472,42 @@ export class TurnManager {
 
   onTurn(e: {
     chatId: number;
+    threadId?: number;
     turnId: string;
     sessionId: string;
     state: 'started' | 'finished' | 'cancelled' | 'failed';
   }): void {
     if (e.state === 'started') {
-      this.start(e.chatId, e.turnId, e.sessionId);
+      this.start(e.chatId, e.threadId, e.turnId, e.sessionId);
       return;
     }
-    const t = this.active.get(e.chatId);
+    const t = this.active.get(convKey(e.chatId, e.threadId));
     if (t && t.turnId === e.turnId) {
       this.close(t, e.state);
       return;
     }
     if (this.finishedSet.has(e.turnId)) return;
-    // Terminal event for a turn we never saw (restart): just release the 👀s.
+    // Terminal event for a turn we never saw (restart): just release the 👀s (and its placeholder).
     if (!t) {
-      this.clearAllAcks(e.chatId);
+      this.clearAllAcks(e.chatId, e.threadId);
       const mid = messageIdFromTurnId(e.turnId);
-      if (mid !== null) this.clearReactions(e.chatId, [mid]);
+      if (mid !== null) {
+        const ph = this.placeholders.get(convKey(e.chatId, e.threadId));
+        if (ph && ph.messageId === mid) this.cancelPlaceholder(e.chatId, e.threadId);
+        else this.clearReactions(e.chatId, [mid]);
+      }
     }
   }
 
-  onPreview(e: { chatId: number; turnId: string; sessionId: string; seq: number; text: string }): void {
-    const t = this.ensure(e.chatId, e.turnId, e.sessionId);
+  onPreview(e: {
+    chatId: number;
+    threadId?: number;
+    turnId: string;
+    sessionId: string;
+    seq: number;
+    text: string;
+  }): void {
+    const t = this.ensure(e.chatId, e.threadId, e.turnId, e.sessionId);
     if (!t || e.seq <= t.lastPreviewSeq) return;
     this.armIdle(t);
     t.lastPreviewSeq = e.seq;
@@ -355,8 +517,15 @@ export class TurnManager {
     this.requestDraft(t);
   }
 
-  onProgress(e: { chatId: number; turnId: string; sessionId: string; seq: number; step: Step }): void {
-    const t = this.ensure(e.chatId, e.turnId, e.sessionId);
+  onProgress(e: {
+    chatId: number;
+    threadId?: number;
+    turnId: string;
+    sessionId: string;
+    seq: number;
+    step: Step;
+  }): void {
+    const t = this.ensure(e.chatId, e.threadId, e.turnId, e.sessionId);
     if (!t || e.seq <= t.lastProgressSeq) return;
     this.armIdle(t);
     t.lastProgressSeq = e.seq;
@@ -370,18 +539,26 @@ export class TurnManager {
     this.scheduleStatusEdit(t);
   }
 
-  /** Active turn for a stopped_message_generation update (memory first). */
-  turnForDraft(chatId: number, draftId: number): { sessionId: string; turnId: string } | undefined {
-    const t = this.active.get(chatId);
-    if (t && !t.closed && t.draftId === draftId) return { sessionId: t.sessionId, turnId: t.turnId };
+  /** Active turn for a stopped_message_generation update (memory first). Draft ids are unique per turn. */
+  turnForDraft(chatId: number, draftId: number): { sessionId: string; turnId: string; threadId?: number } | undefined {
+    for (const t of this.active.values()) {
+      if (t.chatId === chatId && !t.closed && t.draftId === draftId) {
+        return { sessionId: t.sessionId, turnId: t.turnId, threadId: t.threadId };
+      }
+    }
     return undefined;
   }
 
   // ---- final -------------------------------------------------------------
 
-  async beginFinal(chatId: number, opts: { failure?: boolean } = {}): Promise<FinalContext> {
-    const turn = this.active.get(chatId);
-    const ctx: FinalContext = { chatId, turn, elapsedMs: turn ? Date.now() - turn.startedAt : 0 };
+  async beginFinal(chatId: number, opts: { failure?: boolean; threadId?: number } = {}): Promise<FinalContext> {
+    const turn = this.active.get(convKey(chatId, opts.threadId));
+    const ctx: FinalContext = {
+      chatId,
+      threadId: opts.threadId,
+      turn,
+      elapsedMs: turn ? Date.now() - turn.startedAt : 0,
+    };
     if (!turn || opts.failure) return ctx;
     ctx.details = await this.computeDetails(turn);
     if (ctx.elapsedMs > this.cfg.notifyAfterMs) ctx.silent = false;
@@ -437,7 +614,10 @@ export class TurnManager {
     if (ctx.turn && !ctx.turn.closed) {
       ctx.turn.inlineFinal = true;
       this.close(ctx.turn, reason);
-    } else if (!ctx.turn) this.clearAllAcks(ctx.chatId);
+    } else if (!ctx.turn) {
+      this.cancelPlaceholder(ctx.chatId, ctx.threadId);
+      this.clearAllAcks(ctx.chatId, ctx.threadId);
+    }
   }
 
   // ---- watchdog / failure ------------------------------------------------
@@ -485,6 +665,7 @@ export class TurnManager {
       const echo = await this.takeEcho(t).catch(() => []);
       await this.d.sender.sendMarkdown(t.chatId, COPY.failGeneric, {
         prio: 'final',
+        threadId: t.threadId,
         markup,
         decorate: echo.length
           ? (ms) => [{ ...ms[0], blocks: [...echoBlocks(echo), ...(ms[0].blocks ?? [])] }, ...ms.slice(1)]
@@ -523,6 +704,7 @@ export class TurnManager {
                 .enqueue(t.chatId, { prio: 'final' }, () =>
                   this.d.api.sendRichMessage({
                     chat_id: t.chatId,
+                    ...threadParam(t.threadId),
                     rich_message: { blocks: tail },
                     reply_parameters: { message_id: out.messageId, allow_sending_without_reply: true },
                   }),
@@ -536,28 +718,32 @@ export class TurnManager {
     if (t.pendingFiles.length && this.fileSender) {
       const files = t.pendingFiles;
       t.pendingFiles = [];
-      await this.fileSender(t.chatId, files);
+      await this.fileSender(t.chatId, files, t.threadId);
     }
   }
 
   // ---- internals ---------------------------------------------------------
 
-  private start(chatId: number, turnId: string, sessionId: string): Turn | undefined {
-    const existing = this.active.get(chatId);
+  private start(chatId: number, threadId: number | undefined, turnId: string, sessionId: string): Turn | undefined {
+    const key = convKey(chatId, threadId);
+    const existing = this.active.get(key);
     if (existing && existing.turnId === turnId) return existing;
     if (this.finishedSet.has(turnId)) return undefined;
     if (existing) this.close(existing, 'superseded');
+    // The placeholder is replaced by this turn's draft (same draft id when it answers the same message).
+    const ph = this.cancelPlaceholder(chatId, threadId, 'start');
     const t: Turn = {
       chatId,
+      threadId,
       turnId,
       sessionId,
       startedAt: Date.now(),
-      draftId: draftIdFor(turnId),
+      draftId: turnDraftId(turnId),
       steps: new Map(),
       previewText: '',
       lastPreviewSeq: 0,
       lastProgressSeq: 0,
-      ackIds: [...(this.acks.get(chatId)?.keys() ?? [])],
+      ackIds: [...(this.acks.get(chatId) ?? [])].filter(([, a]) => a.threadId === threadId).map(([id]) => id),
       pendingFiles: [],
       delivered: false,
       inlineFinal: false,
@@ -573,20 +759,22 @@ export class TurnManager {
     };
     // turnId is the inbound row id: after a host restart the 👀 can still be found and cleared.
     const mid = messageIdFromTurnId(turnId);
-    if (mid !== null && !t.ackIds.includes(mid)) t.ackIds.push(mid);
-    this.active.set(chatId, t);
+    // (A message answered by a placeholder never got a 👀: nothing to clear.)
+    if (mid !== null && !t.ackIds.includes(mid) && !(ph && ph.messageId === mid)) t.ackIds.push(mid);
+    this.active.set(key, t);
     this.armIdle(t);
-    t.draftStartTimer = setTimeout(() => this.startDraft(t), this.cfg.draftDelayMs);
+    if (this.cfg.draftDelayMs <= 0) this.startDraft(t);
+    else t.draftStartTimer = setTimeout(() => this.startDraft(t), this.cfg.draftDelayMs);
     t.statusStartTimer = setTimeout(() => this.showStatus(t), this.cfg.statusDelayMs);
     return t;
   }
 
   /** Lenient: a preview/progress for an unseen turn starts it (e.g. after a host restart). */
-  private ensure(chatId: number, turnId: string, sessionId: string): Turn | undefined {
-    const t = this.active.get(chatId);
+  private ensure(chatId: number, threadId: number | undefined, turnId: string, sessionId: string): Turn | undefined {
+    const t = this.active.get(convKey(chatId, threadId));
     if (t && t.turnId === turnId) return t.closed ? undefined : t;
     if (this.finishedSet.has(turnId)) return undefined;
-    return this.start(chatId, turnId, sessionId);
+    return this.start(chatId, threadId, turnId, sessionId);
   }
 
   private startDraft(t: Turn): void {
@@ -631,15 +819,20 @@ export class TurnManager {
       t.heartbeatTimer = undefined;
       this.requestDraft(t);
     }, this.cfg.heartbeatMs);
-    const p = this.d.sched.enqueue(t.chatId, { prio: 'draft', key: 'draft', maxRateRetries: 1 }, async () => {
-      if (t.closed || t.draftsDisabled) return;
-      await this.d.api.sendRichMessageDraft({
-        chat_id: t.chatId,
-        draft_id: t.draftId,
-        rich_message: { blocks: this.draftBlocks(t) },
-        ...(this.cfg.stopEnabled ? { can_stop: true } : {}),
-      });
-    });
+    const p = this.d.sched.enqueue(
+      t.chatId,
+      { prio: 'draft', key: this.sk('draft', t.threadId), maxRateRetries: 1 },
+      async () => {
+        if (t.closed || t.draftsDisabled) return;
+        await this.d.api.sendRichMessageDraft({
+          chat_id: t.chatId,
+          ...threadParam(t.threadId),
+          draft_id: t.draftId,
+          rich_message: { blocks: this.draftBlocks(t) },
+          ...(this.cfg.stopEnabled ? { can_stop: true } : {}),
+        });
+      },
+    );
     p.catch((err: unknown) => {
       if (err instanceof TelegramError) {
         if (err.kind === 'forbidden') {
@@ -708,10 +901,11 @@ export class TurnManager {
     t.statusStartTimer = undefined;
     if (t.closed || t.statusSend) return;
     t.statusSend = this.d.sched
-      .enqueue(t.chatId, { prio: 'status', key: 'status:send' }, async () => {
+      .enqueue(t.chatId, { prio: 'status', key: this.sk('status:send', t.threadId) }, async () => {
         if (t.closed) return undefined;
         const m = await this.d.api.sendRichMessage({
           chat_id: t.chatId,
+          ...threadParam(t.threadId),
           disable_notification: true,
           rich_message: this.statusMessage(t),
           ...(this.statusMarkup(t) ? { reply_markup: this.statusMarkup(t) } : {}),
@@ -763,16 +957,20 @@ export class TurnManager {
     if (t.closed || t.statusMessageId === undefined) return;
     const messageId = t.statusMessageId;
     t.statusEditInFlight = true;
-    const p = this.d.sched.enqueue(t.chatId, { prio: 'status', key: 'status:edit', maxRateRetries: 1 }, async () => {
-      if (t.closed) return;
-      t.statusLastEditAt = Date.now();
-      await this.d.api.editMessageText({
-        chat_id: t.chatId,
-        message_id: messageId,
-        rich_message: this.statusMessage(t),
-        ...(this.statusMarkup(t) ? { reply_markup: this.statusMarkup(t) } : {}),
-      });
-    });
+    const p = this.d.sched.enqueue(
+      t.chatId,
+      { prio: 'status', key: this.sk('status:edit', t.threadId), maxRateRetries: 1 },
+      async () => {
+        if (t.closed) return;
+        t.statusLastEditAt = Date.now();
+        await this.d.api.editMessageText({
+          chat_id: t.chatId,
+          message_id: messageId,
+          rich_message: this.statusMessage(t),
+          ...(this.statusMarkup(t) ? { reply_markup: this.statusMarkup(t) } : {}),
+        });
+      },
+    );
     this.fire(p, 'status edit', t.chatId);
     void p
       .catch(() => {})
@@ -820,11 +1018,12 @@ export class TurnManager {
       t.statusEditTimer =
       t.idleTimer =
         undefined;
-    if (this.active.get(t.chatId) === t) this.active.delete(t.chatId);
+    const key = convKey(t.chatId, t.threadId);
+    if (this.active.get(key) === t) this.active.delete(key);
     this.rememberFinished(t.turnId);
-    this.d.sched.cancel(t.chatId, 'draft');
-    this.d.sched.cancel(t.chatId, 'status:edit');
-    this.d.sched.cancel(t.chatId, 'status:send');
+    this.d.sched.cancel(t.chatId, this.sk('draft', t.threadId));
+    this.d.sched.cancel(t.chatId, this.sk('status:edit', t.threadId));
+    this.d.sched.cancel(t.chatId, this.sk('status:send', t.threadId));
     this.d.store.closeDraft(t.chatId, t.draftId, Date.now()).catch(() => {});
 
     // 👀 off for every message this turn answered.
@@ -837,12 +1036,15 @@ export class TurnManager {
     const finalizeCard = (id: number | undefined) => {
       if (id === undefined) return;
       this.fire(
-        this.d.sched.enqueue(t.chatId, { prio: 'status', key: 'status:final', maxRateRetries: 3 }, () =>
-          this.d.api.editMessageText({
-            chat_id: t.chatId,
-            message_id: id,
-            rich_message: { blocks: [{ type: 'paragraph', text }] },
-          }),
+        this.d.sched.enqueue(
+          t.chatId,
+          { prio: 'status', key: this.sk('status:final', t.threadId), maxRateRetries: 3 },
+          () =>
+            this.d.api.editMessageText({
+              chat_id: t.chatId,
+              message_id: id,
+              rich_message: { blocks: [{ type: 'paragraph', text }] },
+            }),
         ),
         'status terminal edit',
         t.chatId,
@@ -871,11 +1073,11 @@ export class TurnManager {
     while (this.finished.length > FINISHED_MEMORY) this.finishedSet.delete(this.finished.shift()!);
   }
 
-  private clearAllAcks(chatId: number): void {
+  private clearAllAcks(chatId: number, threadId?: number): void {
     const m = this.acks.get(chatId);
     if (!m || m.size === 0) return;
-    const ids = [...m.keys()];
-    m.clear();
+    const ids = [...m].filter(([, a]) => a.threadId === threadId).map(([id]) => id);
+    for (const id of ids) m.delete(id);
     this.clearReactions(chatId, ids);
   }
 
@@ -914,5 +1116,7 @@ export class TurnManager {
       }
     }
     this.active.clear();
+    for (const ph of this.placeholders.values()) if (ph.timer) clearInterval(ph.timer);
+    this.placeholders.clear();
   }
 }

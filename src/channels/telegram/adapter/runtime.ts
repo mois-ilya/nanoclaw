@@ -242,7 +242,7 @@ export function api(): BotApi {
 export async function sendProduct(
   chatId: number,
   md: string,
-  opts: { buttons?: ProductButton[][]; silent?: boolean; replyTo?: number } = {},
+  opts: { buttons?: ProductButton[][]; silent?: boolean; replyTo?: number; threadId?: number } = {},
 ): Promise<{ messageId: number }> {
   const rt = need();
   const markup = buildKeyboard(opts.buttons, rt.botUsername, rt.miniAppShortName, rt.miniAppUrl);
@@ -250,6 +250,7 @@ export async function sendProduct(
     prio: 'product',
     silent: opts.silent,
     replyTo: opts.replyTo,
+    threadId: opts.threadId,
     markup,
   });
   return { messageId: ids[0] ?? 0 };

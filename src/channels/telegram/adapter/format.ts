@@ -55,6 +55,8 @@ export function chatIdFromPlatformId(platformId: string): number | null {
 
 /** Inbound row / turn id "tg:<chat>:<mid>[:suffix]" -> user message id. */
 export function messageIdFromTurnId(turnId: string): number | null {
+  // `<orig>:echo:<session>` is a cross-session copy of ANOTHER conversation's message: not this turn's message.
+  if (turnId.includes(':echo:')) return null;
   const m = /^tg:-?\d+:(\d+)/.exec(turnId);
   return m ? Number(m[1]) : null;
 }
@@ -77,4 +79,34 @@ export function classifyFailure(
 export function baseTurnId(turnId: string): string {
   const m = /^tg:-?\d+:\d+/.exec(turnId);
   return m ? m[0] : turnId;
+}
+
+/**
+ * Router thread id ("7") -> Telegram `message_thread_id`. Only plain positive integers are real topics:
+ * reserved ids ('system:tasks:…', 'task:…') and anything else never reach Telegram as a thread.
+ */
+export function parseThreadId(raw: string | number | null | undefined): number | undefined {
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) && raw > 0 ? raw : undefined;
+  if (typeof raw !== 'string' || !/^\d{1,15}$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return n > 0 ? n : undefined;
+}
+
+/** Spreadable `message_thread_id` for any send* / sendChatAction / draft call. */
+export function threadParam(threadId: number | undefined): { message_thread_id?: number } {
+  return threadId !== undefined ? { message_thread_id: threadId } : {};
+}
+
+/** Key of one conversation of a private chat: the chat itself ('general') or one topic of it. */
+export function convKey(chatId: number, threadId: number | undefined): string {
+  return threadId === undefined ? `${chatId}` : `${chatId}#${threadId}`;
+}
+
+/**
+ * Draft id of the turn answering this inbound row. The «Thinking…» placeholder (sent on accept, before the turn
+ * exists) and the turn's own rich draft both use it, so Telegram animates one into the other.
+ */
+export function turnDraftId(turnId: string): number {
+  // An echo id must not share the draft id of the original message it copies.
+  return draftIdFor(turnId.includes(':echo:') ? turnId : baseTurnId(turnId));
 }
