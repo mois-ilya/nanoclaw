@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { getAgentMailbox } from '../mailbox/index.js';
 import type { OutboundMessage } from '../mailbox/types.js';
+import { getCurrentReplyRoute, takePendingSuggestions } from './session-state.js';
 
 export interface MessageOutRow {
   id: string;
@@ -75,6 +76,70 @@ function decorateContent(msg: WriteMessageOut): string {
   return changed ? JSON.stringify(payload) : msg.content;
 }
 
+/**
+ * nanoclaw-fork: stamp the turn's pending `suggest_replies` list onto the first
+ * user-visible chat row bound for the conversation being answered
+ * (`content.nc.suggest`). Edits, reactions, failure notices, stop notes and
+ * rows that carry their own buttons (reminders) never consume it.
+ */
+function stampSuggestions(msg: WriteMessageOut): string {
+  if (msg.kind !== 'chat' || !msg.channel_type || msg.channel_type === 'agent' || !msg.platform_id) return msg.content;
+  let payload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(msg.content);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return msg.content;
+    payload = parsed as Record<string, unknown>;
+  } catch {
+    return msg.content;
+  }
+  const nc = (typeof payload.nc === 'object' && payload.nc !== null ? payload.nc : {}) as Record<string, unknown>;
+  const hasBody = ['text', 'markdown'].some((k) => typeof payload[k] === 'string' && (payload[k] as string).trim());
+  if (!hasBody || payload.operation || payload.failureNotice || nc.stopped || nc.reminder || nc.taskCreated) {
+    return msg.content;
+  }
+  try {
+    const route = getCurrentReplyRoute();
+    if (route?.platformId && route.platformId !== msg.platform_id) return msg.content;
+    const replies = takePendingSuggestions();
+    if (!replies) return msg.content;
+    return JSON.stringify({ ...payload, nc: { ...nc, suggest: replies } });
+  } catch {
+    return msg.content;
+  }
+}
+
+/**
+ * nanoclaw-fork: tag chat rows with the turn they belong to so the host adapter can tell a
+ * user's turn from a scheduled-task output delivered at the same moment:
+ *   - written while answering a chat batch      -> `nc.turnId` = first inbound row of the batch
+ *   - written during a scheduled-task run       -> `nc.source = 'task'` (+ `nc.seriesId`)
+ * Failure notices and stop notes carry their own `nc`; edits/reactions are left alone.
+ */
+function stampTurn(msg: WriteMessageOut, content: string): string {
+  if (msg.kind !== 'chat' || !msg.channel_type || msg.channel_type === 'agent' || !msg.platform_id) return content;
+  let payload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return content;
+    payload = parsed as Record<string, unknown>;
+  } catch {
+    return content;
+  }
+  if (payload.operation || payload.failureNotice) return content;
+  const nc = (typeof payload.nc === 'object' && payload.nc !== null ? payload.nc : {}) as Record<string, unknown>;
+  if (nc.stopped || nc.turnId || nc.source) return content;
+  try {
+    const route = getCurrentReplyRoute();
+    if (!route || (route.platformId && route.platformId !== msg.platform_id)) return content;
+    const tag = route.taskRun
+      ? { source: 'task', ...(route.seriesId ? { seriesId: route.seriesId } : {}) }
+      : { turnId: route.inReplyTo };
+    return JSON.stringify({ ...payload, nc: { ...tag, ...nc } });
+  } catch {
+    return content;
+  }
+}
+
 function messageRow(message: OutboundMessage): MessageOutRow {
   return {
     id: message.id,
@@ -101,7 +166,7 @@ export function writeMessageOut(msg: WriteMessageOut): Promise<number> {
     platformId: msg.platform_id,
     channelType: msg.channel_type,
     threadId: msg.thread_id,
-    content: decorateContent(msg),
+    content: decorateContent({ ...msg, content: stampTurn(msg, stampSuggestions(msg)) }),
   });
 }
 

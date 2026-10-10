@@ -17,6 +17,7 @@ import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
 import type { SessionWatch } from './drivers/types.js';
+import { sweepInboxes } from './inbox-sweep.js';
 import { log } from './log.js';
 import { registerReconcileEnqueue } from './reconcile-feeds.js';
 import { createReconcileQueue, type InProcessReconcileQueue } from './reconcile-queue.js';
@@ -46,6 +47,9 @@ const SWEEP_INTERVAL_MS = 60_000;
  * synchronous IO and neither gains nor loses.
  */
 export const RECONCILE_CONCURRENCY = 8;
+
+const INBOX_SWEEP_EVERY_MS = 60 * 60 * 1000;
+let lastInboxSweepMs = 0;
 
 let running = false;
 let queue: InProcessReconcileQueue | null = null;
@@ -107,6 +111,15 @@ export function startHostSweep(): void {
           await stopOrphanedSessions();
         } catch (err) {
           log.error('Orphaned container sweep failed', { err });
+        }
+        // nanoclaw-fork: attachment retention + per-tenant quota; hourly is plenty.
+        if (Date.now() - lastInboxSweepMs >= INBOX_SWEEP_EVERY_MS) {
+          lastInboxSweepMs = Date.now();
+          try {
+            sweepInboxes();
+          } catch (err) {
+            log.error('Inbox sweep failed', { err });
+          }
         }
       },
       // Finalize any "Reject with reason…" holds whose reply window elapsed

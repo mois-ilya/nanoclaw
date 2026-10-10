@@ -24,4 +24,7 @@ import './interactive/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
+// Product module (tenants, onboarding, Mini App backend). Kept before community-portal:
+// its registration test takes the LAST host-start callback.
+import '../nc/index.js';
 import './community-portal/index.js';

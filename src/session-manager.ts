@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
-import { AnchoredDir } from './anchored-dir.js';
+import { AnchoredDir, FileTooLargeError } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
@@ -336,6 +336,12 @@ export async function writeSessionMessage(
  *      of either name cannot redirect a write.
  *   3. exclusive create: never follows or overwrites an existing entry.
  */
+/** `doc.pdf` -> `doc-2.pdf` */
+function suffixedName(name: string, n: number): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? `${name.slice(0, dot)}-${n}${name.slice(dot)}` : `${name}-${n}`;
+}
+
 function extractAttachmentFiles(
   agentGroupId: string,
   sessionId: string,
@@ -387,25 +393,33 @@ function extractAttachmentFiles(
       // Unsafe inbox — no attachment can be written safely.
       if (!inbox) break;
 
-      try {
-        inbox.writeNewFile(filename, Buffer.from(att.data as string, 'base64'));
-      } catch (err: unknown) {
-        const e = err as NodeJS.ErrnoException;
-        if (e.code === 'EEXIST') {
-          log.warn('Inbox attachment target already exists, refusing to overwrite', {
-            messageId,
-            filename,
-          });
-          continue;
+      // nanoclaw-fork: a name collision gets a suffixed name instead of dropping the file (the adapter
+      // already dedupes names within a batch, so this is only a safety net).
+      const bytes = Buffer.from(att.data as string, 'base64');
+      let saved: string | undefined;
+      for (let n = 1; n <= 20 && saved === undefined; n++) {
+        const candidate = n === 1 ? filename : suffixedName(filename, n);
+        try {
+          inbox.writeNewFile(candidate, bytes);
+          saved = candidate;
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          log.warn('Inbox attachment target already exists, trying another name', { messageId, filename: candidate });
         }
-        throw err;
       }
+      if (saved === undefined) {
+        // Never leave megabytes of base64 inside the message row.
+        delete att.data;
+        changed = true;
+        continue;
+      }
+      const finalName = saved;
 
-      att.name = filename;
-      att.localPath = `inbox/${messageId}/${filename}`;
+      att.name = finalName;
+      att.localPath = `inbox/${messageId}/${finalName}`;
       delete att.data;
       changed = true;
-      log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+      log.debug('Saved attachment to inbox', { messageId, filename: finalName, size: att.size });
     }
   } finally {
     inbox?.close();
@@ -495,14 +509,26 @@ export function writeOutboundDirect(
  * actually on disk — delivery continues without attachments rather than
  * failing the whole message.
  */
+export const OUTBOX_FILE_MAX_BYTES = 50 * 1024 * 1024;
+
+/** A declared outbox file that could not be handed to the channel (nanoclaw-fork: the user is told, not left with silence). */
+export interface OutboxProblem {
+  filename: string;
+  reason: 'too-large' | 'unreadable';
+  size?: number;
+}
+
 export function readOutboxFiles(
   agentGroupId: string,
   sessionId: string,
   messageId: string,
   filenames: string[],
+  problems?: OutboxProblem[],
+  maxBytes = OUTBOX_FILE_MAX_BYTES,
 ): OutboundFile[] | undefined {
   if (!isSafeAttachmentName(messageId)) {
     log.warn('Rejecting unsafe outbox message id', { messageId });
+    for (const filename of filenames) problems?.push({ filename, reason: 'unreadable' });
     return undefined;
   }
 
@@ -513,21 +539,32 @@ export function readOutboxFiles(
     outbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['outbox', messageId]);
   } catch (err) {
     log.warn('Rejecting unsafe outbox directory', { messageId, err });
+    for (const filename of filenames) problems?.push({ filename, reason: 'unreadable' });
     return undefined;
   }
-  if (!outbox) return undefined;
+  if (!outbox) {
+    for (const filename of filenames) problems?.push({ filename, reason: 'unreadable' });
+    return undefined;
+  }
 
   const files: OutboundFile[] = [];
   try {
     for (const filename of filenames) {
       if (!isSafeAttachmentName(filename)) {
         log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
+        problems?.push({ filename, reason: 'unreadable' });
         continue;
       }
       try {
-        files.push({ filename, data: outbox.readFile(filename) });
+        files.push({ filename, data: outbox.readFile(filename, maxBytes) });
       } catch (err) {
-        log.warn('Outbox file missing or not a regular file', { messageId, filename, err });
+        if (err instanceof FileTooLargeError) {
+          log.warn('Outbox file over the size limit — not read', { messageId, filename, size: err.size, maxBytes });
+          problems?.push({ filename, reason: 'too-large', size: err.size });
+        } else {
+          log.warn('Outbox file missing or not a regular file', { messageId, filename, err });
+          problems?.push({ filename, reason: 'unreadable' });
+        }
       }
     }
   } finally {

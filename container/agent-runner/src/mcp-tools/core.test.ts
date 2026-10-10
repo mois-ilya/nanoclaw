@@ -141,11 +141,14 @@ describe('send_message / send_file — thread for a channel destination', () => 
   // send_file stages the file under /workspace/outbox, which only exists in a
   // container. Routing is what's under test, so stub the copy.
   let fsSpies: Array<{ mockRestore(): void }> = [];
+  let fileSize = 10;
 
   beforeEach(() => {
     seedChannelDestination('current-chat', 'slack', 'C123');
+    fileSize = 10;
     fsSpies = [
       spyOn(fs, 'existsSync').mockReturnValue(true),
+      spyOn(fs, 'statSync').mockImplementation((() => ({ size: fileSize })) as never),
       spyOn(fs, 'mkdirSync').mockReturnValue(undefined),
       spyOn(fs, 'copyFileSync').mockReturnValue(undefined),
     ];
@@ -161,6 +164,17 @@ describe('send_message / send_file — thread for a channel destination', () => 
     expect(file.isError).toBeUndefined();
     return getUndeliveredMessages().map((m) => m.thread_id);
   }
+
+  it('refuses a file above the host outbox limit so the agent can compress or split it', async () => {
+    fileSize = 50 * 1024 * 1024 + 1;
+    const res = (await sendFile.handler({ to: 'current-chat', path: '/tmp/big.bin' })) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('too large');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
 
   it('replies in the thread of the message being answered, even when the session has no bound thread', async () => {
     // A shared / agent-shared session (or a DM sub-thread) is bound to the

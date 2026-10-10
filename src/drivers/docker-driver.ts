@@ -21,6 +21,7 @@ import fs from 'fs';
 import os from 'os';
 
 import { log } from '../log.js';
+import { logContentEnabled } from '../log-content.js'; // nanoclaw-fork
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
 import { JsonDocumentStream } from './json-stream.js';
@@ -497,14 +498,21 @@ class DockerHandle implements SessionHandle {
     const proc = this.cli.start(['start', '--attach', this.name]);
     this.#proc = proc;
     proc.onStderr((line) => {
-      log.debug(line, { container: this.name });
+      // nanoclaw-fork: NANOCLAW_LOG_CONTENT=0 — the runner prints result text / scratchpad to stderr
+      if (logContentEnabled()) log.debug(line, { container: this.name });
+      else log.debug('container stderr (content hidden)', { container: this.name, chars: line.length });
       this.#stderrTail.push(line);
       if (this.#stderrTail.length > 10) this.#stderrTail.shift();
     });
     proc.onExit((code) => {
       this.#attachExitCode = code;
       if (!this.#stopping && code !== 0 && code !== null && this.#stderrTail.length > 0) {
-        log.warn('Container exited non-zero', { containerName: this.name, code, stderrTail: this.#stderrTail });
+        // nanoclaw-fork: NANOCLAW_LOG_CONTENT=0 hides the tail (it may carry message content)
+        log.warn('Container exited non-zero', {
+          containerName: this.name,
+          code,
+          stderrTail: logContentEnabled() ? this.#stderrTail : `[${this.#stderrTail.length} lines hidden]`,
+        });
       }
       // Every observed terminal transition rides the driver-level stream —
       // even ends the host requested. Intent filtering is the hub's job.

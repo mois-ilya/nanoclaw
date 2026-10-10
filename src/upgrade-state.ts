@@ -27,12 +27,16 @@ export interface UpgradeState {
   /** Update channel and ref the updater merged; absent for setup and older stamps. */
   channel?: string;
   ref?: string;
+  /** nanoclaw-fork: Nix build id (NANOCLAW_BUILD_ID); set only for Nix-built trees. */
+  buildId?: string;
 }
 
 export interface CodeIdentity {
   version: string;
   commit: string;
   tree: string;
+  /** nanoclaw-fork: NANOCLAW_BUILD_ID when set. Replaces commit/tree in the comparison. */
+  buildId?: string;
 }
 
 const MARKER_PATH = path.join(DATA_DIR, 'upgrade-state.json');
@@ -56,6 +60,9 @@ export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdenti
     }).trim();
 
   const version = getCodeVersion(projectRoot);
+  // nanoclaw-fork: a Nix-built tree has no .git; its identity is the build id.
+  const buildId = process.env.NANOCLAW_BUILD_ID?.trim();
+  if (buildId) return { version, commit: 'unknown', tree: 'unknown', buildId };
   try {
     return { version, commit: git('HEAD'), tree: git('HEAD^{tree}') };
   } catch {
@@ -104,6 +111,7 @@ export function writeUpgradeState(opts: {
     updatedAt: new Date().toISOString(),
     via: opts.via,
   };
+  if (identity.buildId !== undefined) state.buildId = identity.buildId; // nanoclaw-fork
   if (opts.channel !== undefined) state.channel = opts.channel;
   if (opts.ref !== undefined) state.ref = opts.ref;
   const marker = markerPath(opts.projectRoot);
@@ -124,6 +132,8 @@ export function isUpgradeCurrent(projectRoot?: string): boolean {
   try {
     const code = getCodeIdentity(projectRoot);
     if (state.version !== code.version) return false;
+    // nanoclaw-fork: Nix build — {version, buildId} is the whole identity.
+    if (code.buildId !== undefined) return state.buildId === code.buildId;
     if (code.commit === 'unknown' || code.tree === 'unknown') {
       // Git cannot identify this checkout (no git binary, or a tree
       // exported/mounted without .git). Commit and tree cannot strengthen

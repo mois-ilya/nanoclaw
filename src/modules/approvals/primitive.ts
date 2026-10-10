@@ -46,9 +46,10 @@ export const REJECT_WITH_REASON_VALUE = 'reject_with_reason';
  * core gateway coordinator's two-button decision flow.
  */
 const APPROVAL_OPTIONS: RawOption[] = [
-  { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve', style: 'primary' },
-  { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject', style: 'danger' },
-  { label: 'Reject with reason…', selectedLabel: '📝 Rejected (awaiting reason)', value: REJECT_WITH_REASON_VALUE },
+  // nanoclaw-fork: Russian labels (the owner reads these cards in Telegram).
+  { label: 'Одобрить', selectedLabel: '✅ Одобрено', value: 'approve', style: 'primary' },
+  { label: 'Отклонить', selectedLabel: '❌ Отклонено', value: 'reject', style: 'danger' },
+  { label: 'Отклонить с причиной…', selectedLabel: '📝 Отклонено (жду причину)', value: REJECT_WITH_REASON_VALUE },
 ];
 
 // ── Approval handler registry ──

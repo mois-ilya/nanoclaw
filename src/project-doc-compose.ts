@@ -159,6 +159,19 @@ const NCL_DEPENDENT_MODULES = new Set(['cli', 'scheduling']);
 const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mcp-tools');
 const SKILLS_HOST_SUBPATH = path.join('container', 'skills');
 
+// nanoclaw-fork: host-owned platform layer (L0). The product module registers a provider that renders the
+// locked rules for a group (language/style contract, voice, safety, budget). They are composed on every spawn
+// from host files, so the agent-writable `instructions.prepend.md` (L1, the user's own layer) can never
+// remove them and template fixes reach existing groups.
+export type PlatformLayerProvider = (group: AgentGroup) => Promise<string | null> | string | null;
+let platformLayerProvider: PlatformLayerProvider | null = null;
+
+export function setPlatformLayerProvider(fn: PlatformLayerProvider | null): void {
+  platformLayerProvider = fn;
+}
+
+export const PLATFORM_SECTION_NAME = 'NanoClaw Platform';
+
 /**
  * Regenerate `groups/<folder>/<spec.fileName>` from every instruction source
  * the group has switched on. Deterministic: same inputs, same file.
@@ -188,6 +201,14 @@ export async function composeGroupProjectDoc(
 
   // The group's standing instructions lead the document, and are never
   // droppable: a group whose persona is evicted stops being that group.
+  // nanoclaw-fork: the locked platform layer leads, then the group's own persona.
+  if (platformLayerProvider) {
+    try {
+      push(PLATFORM_SECTION_NAME, (await platformLayerProvider(group)) ?? '');
+    } catch (err) {
+      log.warn('Platform layer provider failed; composing without it', { group: group.name, err });
+    }
+  }
   const persona = readGroupPersona(groupDir);
   if (persona) push('Persona', persona);
 

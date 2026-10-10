@@ -10,6 +10,7 @@
  * inline in core — it's 15 lines guarded by `hasTable('pending_questions')`,
  * modularizing it adds more registry surface than it saves.
  */
+import { logContentEnabled } from '../../log-content.js'; // nanoclaw-fork
 import { getDb, hasTable } from '../../db/connection.js';
 import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -48,7 +49,7 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<bool
   await deletePendingQuestion(payload.questionId);
   log.info('Question response routed', {
     questionId: payload.questionId,
-    selectedOption: payload.value,
+    ...(logContentEnabled() ? { selectedOption: payload.value } : {}), // nanoclaw-fork: NANOCLAW_LOG_CONTENT=0
     sessionId: session.id,
   });
 

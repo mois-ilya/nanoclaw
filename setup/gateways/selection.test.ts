@@ -63,8 +63,14 @@ describe('implicit gateway migration', () => {
   });
 });
 
+// nanoclaw-fork: the fork's root is a pnpm workspace (miniapp/), which changes
+// the symlinked node_modules state this probe mirrors, so the inner pnpm no
+// longer prints the WARN it relies on. The detector itself is unaffected; only
+// the reproduction of the noisy-stdout condition depends on a non-workspace root.
+const hostIsWorkspace = /^packages:/m.test(fs.readFileSync('pnpm-workspace.yaml', 'utf8'));
+
 describe('real detector probe', () => {
-  it('detects an installed gateway from inside a nested pnpm', () => {
+  it.skipIf(hostIsWorkspace)('detects an installed gateway from inside a nested pnpm', () => {
     // An outer `pnpm exec` sets this. The inner pnpm then prints a WARN to stdout
     // for a nested package.json with a `pnpm` field, ahead of the detector's answer.
     vi.stubEnv('pnpm_config_verify_deps_before_run', 'false');

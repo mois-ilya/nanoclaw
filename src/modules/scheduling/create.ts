@@ -144,6 +144,10 @@ export async function createScheduledTask(
       processAfter: task.processAfter,
       recurrence: task.recurrence,
       content: JSON.stringify({
+        // nanoclaw-fork: the human-readable (Unicode) name survives in the content; the id slug drops non-ASCII.
+        ...(typeof task.name === 'string' && task.name.trim()
+          ? { name: task.name.replace(/\s+/g, ' ').trim().slice(0, 60) }
+          : {}),
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,

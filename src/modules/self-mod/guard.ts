@@ -20,11 +20,21 @@
 import { getSessionDriver } from '../../drivers/index.js';
 import { DENY, HOLD, defineGuardedAction, type GuardInput } from '../../guard/index.js';
 
+// nanoclaw-fork: a product veto. Friends' agents may not even ask the owner to add MCP servers or packages
+// (plan v8 M9): the owner would get cards for something a friend is not entitled to.
+export type SelfModVeto = (agentGroupId: string) => Promise<string | null> | string | null;
+let selfModVeto: SelfModVeto | null = null;
+export function setSelfModVeto(fn: SelfModVeto | null): void {
+  selfModVeto = fn;
+}
+
 function selfModDecide(label: string) {
-  return (input: GuardInput) => {
+  return async (input: GuardInput) => {
     if (input.actor.kind !== 'agent') {
       return DENY(`${label} is a container-originated action.`);
     }
+    const vetoed = selfModVeto ? await selfModVeto(input.actor.agentGroupId) : null;
+    if (vetoed) return DENY(vetoed);
     return HOLD(`${label} always requires admin approval from the container path`);
   };
 }
@@ -34,7 +44,7 @@ const holdInstallPackages = selfModDecide('install_packages');
 export const selfModInstallPackages = defineGuardedAction({
   action: 'self_mod.install_packages',
   grantActionName: 'install_packages',
-  decide: (input) => {
+  decide: async (input) => {
     // The capability gate runs first: a deny for "this runtime cannot do it"
     // must win over a hold even for a request that would otherwise card an
     // admin. Gate on capabilities(), never on kind (drivers/index.ts).
@@ -44,7 +54,7 @@ export const selfModInstallPackages = defineGuardedAction({
           'capability — packages cannot be installed on this runtime (image changes are built and imported out of band)',
       );
     }
-    return holdInstallPackages(input);
+    return await holdInstallPackages(input);
   },
 });
 

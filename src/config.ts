@@ -16,6 +16,8 @@ const envConfig = readEnvFile([
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
+  'CONTAINER_SHM_MB', // nanoclaw-fork: configurable /dev/shm
+  'CONTAINER_TMP_MB', // nanoclaw-fork: /tmp tmpfs cap (podman driver)
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'WEBHOOK_PORT',
@@ -100,6 +102,15 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 // blocks it from spawning subprocesses, and neither is reported as a PID limit.
 // Empty = no cap.
 export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfig.CONTAINER_PIDS_LIMIT ?? '2048';
+
+// nanoclaw-fork: /dev/shm size (default = the previously hard-coded 1024) and the
+// agent /tmp tmpfs cap used by the podman driver. A bad value falls back to the default.
+function positiveMb(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+export const CONTAINER_SHM_MB = positiveMb(process.env.CONTAINER_SHM_MB ?? envConfig.CONTAINER_SHM_MB, 1024);
+export const CONTAINER_TMP_MB = positiveMb(process.env.CONTAINER_TMP_MB ?? envConfig.CONTAINER_TMP_MB, 512);
 
 // Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.

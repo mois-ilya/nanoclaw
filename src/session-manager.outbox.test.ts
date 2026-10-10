@@ -13,7 +13,7 @@ vi.mock('./config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-outbox-root' };
 });
 
-import { clearOutbox, readOutboxFiles, sessionDir } from './session-manager.js';
+import { clearOutbox, readOutboxFiles, sessionDir, type OutboxProblem } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-outbox-root';
 const AG = 'ag-outbox';
@@ -110,5 +110,26 @@ describe('outbox happy path', () => {
 
     expect(fs.existsSync(path.join(outboxRoot(), 'msg-link'))).toBe(false);
     expect(fs.readFileSync(target, 'utf-8')).toBe('keep');
+  });
+});
+
+describe('outbox size limit and problems', () => {
+  it('does not read a file over the limit and reports it', () => {
+    fs.mkdirSync(path.join(outboxRoot(), 'msg-big'), { recursive: true });
+    fs.writeFileSync(path.join(outboxRoot(), 'msg-big', 'big.bin'), Buffer.alloc(100));
+    fs.writeFileSync(path.join(outboxRoot(), 'msg-big', 'ok.txt'), 'ok');
+    const problems: OutboxProblem[] = [];
+    const files = readOutboxFiles(AG, SESS, 'msg-big', ['big.bin', 'ok.txt', 'gone.txt'], problems, 50);
+    expect(files?.map((f) => f.filename)).toEqual(['ok.txt']);
+    expect(problems).toEqual([
+      { filename: 'big.bin', reason: 'too-large', size: 100 },
+      { filename: 'gone.txt', reason: 'unreadable' },
+    ]);
+  });
+
+  it('reports every declared file when the outbox directory is missing', () => {
+    const problems: OutboxProblem[] = [];
+    expect(readOutboxFiles(AG, SESS, 'msg-none', ['a.txt'], problems)).toBeUndefined();
+    expect(problems).toEqual([{ filename: 'a.txt', reason: 'unreadable' }]);
   });
 });

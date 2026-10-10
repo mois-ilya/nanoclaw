@@ -34,9 +34,13 @@ import fs from 'fs';
 import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
+import { idleMsFor, sessionKind } from './lifecycle-policy.js';
+import { setIdlePreemptor } from './spawn-admission.js'; // nanoclaw-fork
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
+import { hasReplyDelivered } from './reply-ledger.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
@@ -49,12 +53,15 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
 const MAX_TRIES = 5;
+// nanoclaw-fork: a chat turn is retried once after a crash (not 5 times with 80 s backoff).
+const CHAT_MAX_TRIES = 1;
 const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
   | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
-  | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
+  | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number }
+  | { action: 'kill-idle'; idleMs: number; limitMs: number };
 
 /**
  * Pure decision for whether a running container should be killed this sweep
@@ -67,8 +74,12 @@ export function decideStuckAction(args: {
   containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ messageId: string; statusChanged: string }>;
+  /** nanoclaw-fork: per-role idle limit (NC_IDLE_*_MINUTES); null/undefined = no idle stop. */
+  idleLimitMs?: number | null;
+  /** nanoclaw-fork: messages are waiting for this container, so it is not idle. */
+  hasDueMessages?: boolean;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, idleLimitMs, hasDueMessages } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
   // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
@@ -88,6 +99,11 @@ export function decideStuckAction(args: {
   // anything) the claim-stuck check below handles it independently of this
   // fallback.
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
+  // nanoclaw-fork: idle stop — nothing claimed, nothing waiting, no activity for the role's limit.
+  if (idleLimitMs && effectiveHeartbeatMs !== 0 && claims.length === 0 && !hasDueMessages && !declaredBashMs) {
+    const idle = now - effectiveHeartbeatMs;
+    if (idle > idleLimitMs) return { action: 'kill-idle', idleMs: idle, limitMs: idleLimitMs };
+  }
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
@@ -173,7 +189,7 @@ async function maintainSessionMailbox(
     await enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
   }
   if (!alive) {
-    resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
+    await noticeGaveUp(mailbox, session, resetStuckProcessingRows(mailbox, mailbox, session, 'container not running'));
   }
 
   // MODULE-HOOK:scheduling-recurrence:start
@@ -198,6 +214,59 @@ async function maintainSessionMailbox(
     log.error('Echo backlog prune failed', { sessionId: session.id, err });
   }
   // MODULE-HOOK:cross-session-echo-prune:end
+}
+
+async function wakeIfDue(session: Session, agentGroupId: string): Promise<void> {
+  try {
+    const due = await withExistingMailboxSession(agentGroupId, session.id, (m) => m.countDueMessages());
+    if (due && due > 0) await requestWake(session, 'due-message');
+  } catch (err) {
+    log.warn('Post-stop wake check failed', { sessionId: session.id, err });
+  }
+}
+
+// nanoclaw-fork: NC_MAX_CONTAINERS counts warm idle containers; when a wake is queued, stop one of them
+// (friend first, then the longest quiet) instead of making the queued user wait out the idle limit.
+const preempting = new Set<string>();
+
+async function preemptIdleContainer(queued: number, activeIds: string[]): Promise<void> {
+  if (preempting.size >= queued) return;
+  const candidates: { id: string; friend: boolean; hbMs: number; session: Session; groupId: string }[] = [];
+  for (const id of activeIds) {
+    if (preempting.has(id)) continue;
+    const session = await getSession(id);
+    if (!session || session.status !== 'active') continue;
+    const idle = await withExistingMailboxSession(session.agent_group_id, id, (m) => {
+      if (m.getProcessingClaims().length > 0) return false;
+      return m.countDueMessages() === 0;
+    }).catch(() => false);
+    if (!idle) continue;
+    const hb = heartbeatMtimeMs(session.agent_group_id, id) || (getContainerStartedAtMs(id) ?? 0);
+    candidates.push({
+      id,
+      friend: sessionKind(session.agent_group_id) !== 'owner',
+      hbMs: hb,
+      session,
+      groupId: session.agent_group_id,
+    });
+  }
+  candidates.sort((a, b) => Number(b.friend) - Number(a.friend) || a.hbMs - b.hbMs);
+  const victim = candidates[0];
+  if (!victim || preempting.size >= queued) return;
+  preempting.add(victim.id);
+  log.info('Stopping idle container to free a slot for a queued wake', { sessionId: victim.id, queued });
+  killContainer(victim.id, 'idle-preempt', () => {
+    preempting.delete(victim.id);
+    void wakeIfDue(victim.session, victim.groupId);
+  });
+}
+
+setIdlePreemptor((queued, activeIds) => {
+  void preemptIdleContainer(queued, activeIds).catch((err) => log.warn('Idle preempt failed', { err }));
+});
+
+export function _preemptIdleContainerForTesting(queued: number, activeIds: string[]): Promise<void> {
+  return preemptIdleContainer(queued, activeIds);
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
@@ -254,9 +323,18 @@ async function enforceRunningContainerSla(
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
     claims: gatedClaims,
+    idleLimitMs: idleMsFor(agentGroupId),
+    hasDueMessages: inDb.countDueMessages() > 0,
   });
 
   if (decision.action === 'ok') return;
+
+  if (decision.action === 'kill-idle') {
+    log.info('Stopping idle container', { sessionId: session.id, idleMs: decision.idleMs, limitMs: decision.limitMs });
+    // nanoclaw-fork: a message that landed while the stop was in flight saw "already running" — wake it after exit.
+    killContainer(session.id, 'idle', () => void wakeIfDue(session, agentGroupId));
+    return;
+  }
 
   if (decision.action === 'kill-ceiling') {
     log.warn('Killing container past absolute ceiling', {
@@ -265,7 +343,7 @@ async function enforceRunningContainerSla(
       ceilingMs: decision.ceilingMs,
     });
     killContainer(session.id, 'absolute-ceiling');
-    resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    await noticeGaveUp(outDb, session, resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling'));
     return;
   }
 
@@ -276,7 +354,7 @@ async function enforceRunningContainerSla(
     toleranceMs: decision.toleranceMs,
   });
   killContainer(session.id, 'claim-stuck');
-  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
+  await noticeGaveUp(outDb, session, resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck'));
 }
 
 export function _resetStuckProcessingRowsForTesting(
@@ -284,8 +362,8 @@ export function _resetStuckProcessingRowsForTesting(
   outDb: OutboundMailbox,
   session: Session,
   reason: string,
-): void {
-  resetStuckProcessingRows(inDb, outDb, session, reason);
+): number {
+  return resetStuckProcessingRows(inDb, outDb, session, reason);
 }
 
 function resetStuckProcessingRows(
@@ -293,9 +371,15 @@ function resetStuckProcessingRows(
   outDb: OutboundMailbox,
   session: Session,
   reason: string,
-): void {
+): number {
+  let failed = 0;
   const claims = outDb.getProcessingClaims();
   const now = Date.now();
+  const isChat = !!session.messaging_group_id && !isTaskThread(session.thread_id);
+  const maxTries = isChat ? CHAT_MAX_TRIES : MAX_TRIES;
+  // nanoclaw-fork: if any message of the crashed batch already got a delivered reply, re-running the
+  // turn would send it again (and repeat side effects): give the batch up instead.
+  const partlyAnswered = isChat && claims.some((c) => hasReplyDelivered(session.id, c.messageId));
   for (const { messageId } of claims) {
     const msg = inDb.getMessageForRetry(messageId, 'pending');
     if (!msg) continue;
@@ -305,13 +389,16 @@ function resetStuckProcessingRows(
     // fresh container will clean the orphan claim on startup.
     if (msg.processAfter && Date.parse(msg.processAfter) > now) continue;
 
-    if (msg.tries >= MAX_TRIES) {
+    if (partlyAnswered || msg.tries >= maxTries) {
       inDb.markMessageFailed(msg.id);
-      log.warn('Message marked as failed after max retries', {
-        messageId: msg.id,
-        sessionId: session.id,
-        reason,
-      });
+      failed++;
+      if (partlyAnswered) partialGaveUp.add(session.id);
+      log.warn(
+        partlyAnswered
+          ? 'Message marked as failed: the crashed turn already delivered a reply'
+          : 'Message marked as failed after max retries',
+        { messageId: msg.id, sessionId: session.id, reason },
+      );
     } else {
       const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
       const backoffSec = Math.floor(backoffMs / 1000);
@@ -336,5 +423,33 @@ function resetStuckProcessingRows(
     }
   } catch (err) {
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
+  }
+  return failed;
+}
+
+// Sessions whose last give-up was a partly answered turn (copy differs from "retries exhausted").
+const partialGaveUp = new Set<string>();
+
+/** nanoclaw-fork: a message given up after MAX_TRIES must not vanish silently. */
+export async function noticeGaveUp(outDb: OutboundMailbox, session: Session, failed: number): Promise<void> {
+  const partial = partialGaveUp.delete(session.id);
+  if (failed === 0 || !session.messaging_group_id || isTaskThread(session.thread_id)) return;
+  try {
+    const mg = await getMessagingGroup(session.messaging_group_id);
+    if (!mg) return;
+    await outDb.writeDirect({
+      id: `gaveup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      platformId: mg.platform_id,
+      channelType: mg.channel_type,
+      threadId: session.thread_id,
+      content: JSON.stringify({
+        text: partial
+          ? 'Ответ оборвался на середине: что-то пошло не так. Часть ты уже получил. Если нужно продолжить, пришли сообщение ещё раз.'
+          : 'Не смог обработать твоё сообщение: несколько попыток подряд не дошли до конца. Пришли его ещё раз.',
+      }),
+    });
+  } catch (err) {
+    log.warn('Failed to notify about a message given up after max retries', { sessionId: session.id, err });
   }
 }

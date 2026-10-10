@@ -231,7 +231,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual(['Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.']);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -270,7 +270,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['Sent before failure.', 'The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual(['Sent before failure.', 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.']);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -290,8 +290,8 @@ describe('error and interrupted turns', () => {
 
     expect(deliveredTexts()).toEqual(
       progress
-        ? ['Progress before failure.', 'The agent run failed. Check the logs for details.']
-        : ['The agent run failed. Check the logs for details.'],
+        ? ['Progress before failure.', 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.']
+        : ['Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.'],
     );
     expect(pushes).toHaveLength(0);
   });
@@ -365,7 +365,7 @@ describe('error and interrupted turns', () => {
     ).rejects.toThrow('SDK stream died');
 
     // The mid-turn write is durable — an interrupted turn cannot claw it back.
-    expect(deliveredTexts()).toEqual(['Sent before the crash.', 'The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual(['Sent before the crash.', 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.']);
   });
 });
 

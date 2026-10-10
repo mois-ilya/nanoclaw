@@ -1,4 +1,4 @@
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, type HookCallback, type PreCompactHookInput, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
@@ -19,6 +19,9 @@ import {
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
+// nanoclaw-fork: typed turn telemetry (progress steps from tool hooks)
+import { turnTelemetry } from '../turn-telemetry.js';
+import { classifyFailure, isOverloadStatus, type FailureClass } from '../failure-class.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -138,18 +141,39 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // nanoclaw-fork: progress step (best-effort, never blocks the tool)
+  try {
+    turnTelemetry.toolStart((input as { tool_use_id?: string }).tool_use_id, toolName, i.tool_input);
+  } catch (err) {
+    log(`PreToolUse: telemetry failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return { continue: true };
 };
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
-  try {
-    clearContainerToolInFlight();
-  } catch (err) {
-    log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { continue: true };
-};
+const postToolUseHook =
+  (ok: boolean): HookCallback =>
+  async (input) => {
+    try {
+      clearContainerToolInFlight();
+    } catch (err) {
+      log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // nanoclaw-fork: progress step completion
+    try {
+      const i = input as { tool_use_id?: string; duration_ms?: number };
+      turnTelemetry.toolEnd(i.tool_use_id, ok, i.duration_ms);
+    } catch (err) {
+      log(`PostToolUse: telemetry failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { continue: true };
+  };
+
+/** nanoclaw-fork: 'internal' is the poll loop's default, so providers only report the specific classes. */
+const nonInternal = (c: FailureClass): FailureClass | undefined => (c === 'internal' ? undefined : c);
+
+/** nanoclaw-fork: how long a graceful interrupt() gets before the SDK subprocess is closed outright. */
+export const ABORT_GRACE_MS = 2000;
 
 /** Minimum spacing between `activity` frames derived from streaming deltas. */
 const STREAM_ACTIVITY_INTERVAL_MS = 1000;
@@ -304,25 +328,58 @@ export class ClaudeProvider implements AgentProvider {
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+          PostToolUse: [{ hooks: [postToolUseHook(true)] }],
+          PostToolUseFailure: [{ hooks: [postToolUseHook(false)] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },
     });
 
     let aborted = false;
+    // nanoclaw-fork: abort() must end the event stream at once, even when the
+    // SDK iterator is parked on a long tool call — race it against this.
+    let wakeOnAbort: () => void = () => {};
+    const abortSignal = new Promise<'aborted'>((resolve) => {
+      wakeOnAbort = () => resolve('aborted');
+    });
+
+    async function* sdkMessages() {
+      const it = sdkResult[Symbol.asyncIterator]();
+      while (true) {
+        const pending = it.next();
+        // The abort path closes the SDK; a rejection of the now-orphaned read is expected.
+        pending.catch(() => {});
+        let next: IteratorResult<SDKMessage, void> | 'aborted';
+        try {
+          next = await Promise.race([pending, abortSignal]);
+        } catch (err) {
+          if (aborted) return;
+          throw err;
+        }
+        if (next === 'aborted' || next.done) return;
+        yield next.value;
+      }
+    }
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
       let lastStreamActivityAt = 0;
-      for await (const message of sdkResult) {
+      for await (const message of sdkMessages()) {
         if (aborted) return;
 
         // Yield activity for every SDK event so the poll loop knows the agent
         // is working. Deltas arrive per token and carry no content for us, so
         // they count at most once per second, and not as messages.
         if (message.type === 'stream_event') {
+          // nanoclaw-fork: the text content is no longer discarded — top-level
+          // text deltas feed the live preview (turn-telemetry.ts).
+          if (message.parent_tool_use_id == null) {
+            const ev = message.event as { type?: string; delta?: { type?: string; text?: string } };
+            if (ev.type === 'message_start') yield { type: 'delta_reset' };
+            else if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+              yield { type: 'delta', text: ev.delta.text };
+            }
+          }
           const now = Date.now();
           if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
           lastStreamActivityAt = now;
@@ -379,9 +436,14 @@ export class ClaudeProvider implements AgentProvider {
             text: resultAsError ? null : (m.result ?? null),
             isError,
             error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
+            // nanoclaw-fork: classified from every text the SDK left (never forwarded raw).
+            failureClass: isError ? nonInternal(classifyFailure(m.errors?.join('\n'), m.result)) : undefined,
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
-          yield { type: 'error', message: 'API retry', retryable: true };
+          // nanoclaw-fork: an overloaded/rate-limited retry is surfaced to the user as a progress step.
+          const retry = message as { error_status?: number | null; error?: string };
+          const overloaded = isOverloadStatus(retry.error_status) || retry.error === 'rate_limit';
+          yield { type: 'error', message: 'API retry', retryable: true, ...(overloaded ? { classification: 'overload' } : {}) };
         } else if (message.type === 'rate_limit_event') {
           // The SDK emits this "when rate limit info CHANGES" — it is telemetry,
           // not necessarily an error. `rate_limit_info.status` is usually
@@ -431,9 +493,26 @@ export class ClaudeProvider implements AgentProvider {
       push: (msg) => stream.push(msg),
       end: () => stream.end(),
       events: translateEvents(),
+      // nanoclaw-fork: a REAL abort. stream.end() alone only stops new input —
+      // an in-flight turn (long generation, running tool) would run to
+      // completion. interrupt() asks the CLI to stop the current turn (it
+      // also stops running tools); if the process has not wound down within
+      // ABORT_GRACE_MS, close() terminates the subprocess outright.
       abort: () => {
+        if (aborted) return;
         aborted = true;
+        wakeOnAbort();
+        void Promise.resolve()
+          .then(() => sdkResult.interrupt())
+          .catch((err) => log(`interrupt failed: ${err instanceof Error ? err.message : String(err)}`));
         stream.end();
+        setTimeout(() => {
+          try {
+            sdkResult.close();
+          } catch (err) {
+            log(`close failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }, Number(process.env.NANOCLAW_ABORT_GRACE_MS) || ABORT_GRACE_MS).unref?.();
       },
     };
   }

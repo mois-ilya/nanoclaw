@@ -13,6 +13,7 @@ import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
+import { contentForLog } from '../log-policy.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -32,7 +33,7 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
-function destinationList(): string {
+export function destinationList(): string {
   const all = getAllDestinations();
   if (all.length === 0) return '(none)';
   return all.map((d) => d.name).join(', ');
@@ -46,7 +47,7 @@ function destinationList(): string {
  * came from that channel, else that channel's latest inbound thread. An agent
  * destination never carries a thread.
  */
-function resolveRouting(
+export function resolveRouting(
   to: string,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
   const dest = findByName(to);
@@ -104,6 +105,9 @@ export const sendMessage: McpToolDefinition = {
   },
 };
 
+// nanoclaw-fork: mirrors OUTBOX_FILE_MAX_BYTES on the host (src/session-manager.ts).
+const OUTBOX_FILE_MAX_BYTES = 50 * 1024 * 1024;
+
 export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
@@ -130,6 +134,13 @@ export const sendFile: McpToolDefinition = {
 
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
+    // nanoclaw-fork: the host refuses to read files above OUTBOX_FILE_MAX_BYTES; say so while the agent can still react.
+    const sizeBytes = fs.statSync(resolvedPath).size;
+    if (sizeBytes > OUTBOX_FILE_MAX_BYTES) {
+      return err(
+        `File is too large to send (${Math.ceil(sizeBytes / 1024 / 1024)} MB, limit ${OUTBOX_FILE_MAX_BYTES / 1024 / 1024} MB): compress or split it, then send the parts.`,
+      );
+    }
 
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
@@ -148,7 +159,7 @@ export const sendFile: McpToolDefinition = {
       content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
     });
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
+    log(`send_file: ${id} → ${routing.resolvedName} (${contentForLog(filename, 120)})`); // nanoclaw-fork: NANOCLAW_LOG_CONTENT
     return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
   },
 };

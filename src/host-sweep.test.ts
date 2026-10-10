@@ -13,6 +13,7 @@ import {
   decideStuckAction,
   shouldCloseTaskSession,
 } from './host-sweep.js';
+import { _resetReplyLedgerForTesting, noteReplyDelivered } from './reply-ledger.js';
 import type { Session } from './types.js';
 import { parseIsoTimestamp } from './mailbox/model.js';
 import { wrapSqliteInbound, wrapSqliteOutbound } from './mailbox/sqlite/index.js';
@@ -340,6 +341,59 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
   });
 });
 
+describe('resetStuckProcessingRows — giving up', () => {
+  it('a message past MAX_TRIES is marked failed and counted (so the user can be told)', () => {
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    inDb
+      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-9', 9, 'chat', ?, 'pending', 5, '{}')")
+      .run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-9', 'processing', ?)").run(claimedAt);
+    expect(_resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck')).toBe(1);
+    expect((inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get('m-9') as { status: string }).status).toBe('failed');
+    // A message still within its tries is only rescheduled.
+    inDb
+      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-8', 8, 'chat', ?, 'pending', 1, '{}')")
+      .run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-8', 'processing', ?)").run(claimedAt);
+    expect(_resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck')).toBe(0);
+  });
+});
+
+describe('resetStuckProcessingRows — chat crash retries', () => {
+  const chat = (): Session => ({ ...fakeSession(), messaging_group_id: 'mg-1' });
+  const seed = (tries: number) => {
+    const { inDb, outDb } = makeSessionDbs();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    inDb
+      .prepare("INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('c-1', 1, 'chat', ?, 'pending', ?, '{}')")
+      .run(at, tries);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('c-1', 'processing', ?)").run(at);
+    return { inDb, outDb };
+  };
+  const status = (inDb: ReturnType<typeof makeSessionDbs>['inDb']) =>
+    (inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get('c-1') as { status: string }).status;
+
+  it('retries a chat turn once, then gives up', () => {
+    _resetReplyLedgerForTesting();
+    const first = seed(0);
+    expect(_resetStuckProcessingRowsForTesting(first.inDb, first.outDb, chat(), 'x')).toBe(0);
+    expect(status(first.inDb)).toBe('pending');
+    const second = seed(1);
+    expect(_resetStuckProcessingRowsForTesting(second.inDb, second.outDb, chat(), 'x')).toBe(1);
+    expect(status(second.inDb)).toBe('failed');
+  });
+
+  it('does not re-run a turn whose reply was already delivered', () => {
+    _resetReplyLedgerForTesting();
+    const { inDb, outDb } = seed(0);
+    noteReplyDelivered('sess-test', 'c-1');
+    expect(_resetStuckProcessingRowsForTesting(inDb, outDb, chat(), 'x')).toBe(1);
+    expect(status(inDb)).toBe('failed');
+    expect(outDb.getProcessingClaims()).toEqual([]);
+  });
+});
+
 describe('shouldCloseTaskSession', () => {
   it('closes a spent per-task session (no live tasks, no container)', () => {
     expect(shouldCloseTaskSession('system:tasks:task-1', false, 0)).toBe(true);
@@ -356,5 +410,25 @@ describe('shouldCloseTaskSession', () => {
   it('never touches non-task sessions', () => {
     expect(shouldCloseTaskSession('telegram:12345', false, 0)).toBe(false);
     expect(shouldCloseTaskSession(null, false, 0)).toBe(false);
+  });
+});
+
+describe('decideStuckAction — per-role idle stop', () => {
+  const now = Date.now();
+  const base = { now, heartbeatMtimeMs: now - 11 * 60_000, containerState: null, claims: [] as never[] };
+  it('stops a container idle past its limit', () => {
+    expect(decideStuckAction({ ...base, idleLimitMs: 10 * 60_000 }).action).toBe('kill-idle');
+  });
+  it('keeps it when under the limit, with due messages, with a claim, or with no limit configured', () => {
+    expect(decideStuckAction({ ...base, idleLimitMs: 30 * 60_000 }).action).toBe('ok');
+    expect(decideStuckAction({ ...base, idleLimitMs: 10 * 60_000, hasDueMessages: true }).action).not.toBe('kill-idle');
+    expect(
+      decideStuckAction({
+        ...base,
+        idleLimitMs: 10 * 60_000,
+        claims: [{ messageId: 'm', statusChanged: new Date(now - 11 * 60_000).toISOString() }],
+      }).action,
+    ).not.toBe('kill-idle');
+    expect(decideStuckAction(base).action).toBe('ok');
   });
 });

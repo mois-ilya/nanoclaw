@@ -17,6 +17,9 @@ vi.mock('./drivers/index.js', () => ({
   isSessionEventsDriver: () => false,
 }));
 
+const failTurnsForSession = vi.hoisted(() => vi.fn());
+vi.mock('./channels/telegram/adapter/runtime.js', () => ({ failTurnsForSession }));
+
 import {
   abortGatewaySessionObservers,
   adoptRunningSessions,
@@ -61,6 +64,7 @@ function fakeHandle(sessionId: string, name: string): SupervisedHandle {
 beforeEach(async () => {
   snapshots.length = 0;
   release.mockClear();
+  failTurnsForSession.mockClear();
   ensure.mockClear();
   reapOrphans.mockClear();
   resetGatewayProvider({
@@ -121,6 +125,14 @@ describe('session claim lifecycle', () => {
       expect(released?.incarnation).toBe(1);
     });
     await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'test-stop' }));
+  });
+
+  it('an ended session fails its open Telegram turn at once (kill and exit paths alike)', async () => {
+    snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    expect(failTurnsForSession).not.toHaveBeenCalled();
+    killContainer('sess-1', 'oom');
+    await vi.waitFor(() => expect(failTurnsForSession).toHaveBeenCalledWith('sess-1', { quiet: true }));
   });
 
   it('a re-adopted session bumps the incarnation via CAS', async () => {

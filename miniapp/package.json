@@ -1,0 +1,25 @@
+{
+  "name": "@nanoclaw/miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "NanoClaw «Кабинет» — Telegram Mini App frontend",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/report-size.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.0",
+    "marked": "^15.0.0",
+    "preact": "^10.26.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}

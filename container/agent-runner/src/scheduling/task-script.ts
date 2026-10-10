@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../heartbeat.js';
+import { contentForLog } from '../log-policy.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
@@ -118,7 +119,7 @@ export async function runScript(
       const stdout = Buffer.concat(out.stdout).toString('utf8');
       const stderr = Buffer.concat(out.stderr).toString('utf8');
       if (stderr) {
-        log(`[${taskId}] stderr: ${stderr.slice(0, 500)}`);
+        log(`[${taskId}] stderr: ${contentForLog(stderr, 500)}`); // nanoclaw-fork: NANOCLAW_LOG_CONTENT
       }
 
       if (error) {

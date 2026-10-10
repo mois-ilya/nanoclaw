@@ -12,5 +12,21 @@
  * egress lockdown network.
  */
 
+/**
+ * nanoclaw-fork: the runtime binary and a fixed argv prefix are configurable so
+ * the residual non-session helpers (image inspect/build) can target a remote
+ * Podman. Both default to plain `docker`, byte-identical to upstream.
+ * `NANOCLAW_CONTAINER_RUNTIME_BIN=podman`,
+ * `NANOCLAW_CONTAINER_RUNTIME_ARGS="--remote --url unix:///run/podman/podman.sock"`.
+ */
+export function containerRuntimeArgv(env: NodeJS.ProcessEnv = process.env): { bin: string; prefix: string[] } {
+  const bin = env.NANOCLAW_CONTAINER_RUNTIME_BIN?.trim() || 'docker';
+  const prefix = env.NANOCLAW_CONTAINER_RUNTIME_ARGS?.trim().split(/\s+/).filter(Boolean) ?? [];
+  return { bin, prefix };
+}
+
 /** The container runtime binary name. */
-export const CONTAINER_RUNTIME_BIN = 'docker';
+export const CONTAINER_RUNTIME_BIN = containerRuntimeArgv().bin;
+
+/** Binary plus argv prefix as one shell-ready string, for the `exec`-style helpers. */
+export const CONTAINER_RUNTIME_CMD = [CONTAINER_RUNTIME_BIN, ...containerRuntimeArgv().prefix].join(' ');

@@ -45,6 +45,8 @@ import { resolvePluginServer } from './plugin-mcp.js';
 import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+// nanoclaw-fork: turn/preview/progress rows for the host UI
+import { turnTelemetry } from './turn-telemetry.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -130,6 +132,7 @@ async function main(): Promise<void> {
   registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 
   try {
+    turnTelemetry.setEnabled(process.env.NANOCLAW_TURN_TELEMETRY !== '0'); // nanoclaw-fork
     await runPollLoop({
       provider,
       providerContract: getProviderRuntimeContract(providerName),

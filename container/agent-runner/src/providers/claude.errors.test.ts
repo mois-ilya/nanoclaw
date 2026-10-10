@@ -76,7 +76,7 @@ it.each([false, true])('delivers the Claude SDK billing error once, with prior r
 
   expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
     ...(partialReply ? ['Finished the first step.'] : []),
-    BILLING_ERROR,
+    'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
   ]);
   expect(exchanges).toEqual([
     { prompt: 'continue', result: BILLING_ERROR, continuation: 'billing-session', status: 'error' },
@@ -138,14 +138,14 @@ it.each([
 });
 
 it.each([
-  ['an API Error dump', 'API Error: 400 rejected input: <internal>private</internal>'],
-  ['a wrapped API Error', 'Failed to authenticate. API Error: 403 denied for tenant private-customer'],
-  ['an unprefixed upstream message', 'Rate limit reached for tenant private-customer'],
-  ['an SDK notice with upstream detail', 'Prompt is too long · automatic compaction failed: API Error: 400 private'],
-  ['a multi-line SDK notice', `${AUTH_ERROR}\nsecond line`],
-])('keeps the generic notice for %s', async (_label, result) => {
+  ['an API Error dump', 'API Error: 400 rejected input: <internal>private</internal>', undefined],
+  ['a wrapped API Error', 'Failed to authenticate. API Error: 403 denied for tenant private-customer', undefined],
+  ['an unprefixed upstream message', 'Rate limit reached for tenant private-customer', 'overload'],
+  ['an SDK notice with upstream detail', 'Prompt is too long · automatic compaction failed: API Error: 400 private', undefined],
+  ['a multi-line SDK notice', `${AUTH_ERROR}\nsecond line`, undefined],
+])('keeps the generic notice for %s', async (_label, result, failureClass) => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result, errors: [] });
-  expect(await resultEvents()).toEqual([{ type: 'result', text: result, isError: true, error: undefined }]);
+  expect(await resultEvents()).toEqual([{ type: 'result', text: result, isError: true, error: undefined, failureClass }]);
 });
 
 it('keeps errors[] as the error when the SDK provides it', async () => {
@@ -165,7 +165,7 @@ it('leaves a successful result untouched', async () => {
   ]);
 });
 
-it('delivers the SDK auth error to the channel instead of the generic notice', async () => {
+it('delivers fixed Russian copy instead of the raw SDK auth error', async () => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: AUTH_ERROR, errors: [] });
   const provider = createProvider('claude');
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
@@ -182,6 +182,9 @@ it('delivers the SDK auth error to the channel instead of the generic notice', a
     claudeRuntimeContract.textDelivery === 'mid-turn-complete',
   );
 
-  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([AUTH_NOTICE]);
+  // never the raw SDK text: fixed Russian copy by failure class
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+    'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
+  ]);
   expect(exchanges.map((e) => [e.result, e.status])).toEqual([[AUTH_NOTICE, 'error']]);
 });

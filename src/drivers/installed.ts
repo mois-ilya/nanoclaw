@@ -6,3 +6,6 @@
 // on purpose: an overlay that instead rewrote the construction expression in
 // `index.ts` would own a patch of this tree's internals, and every later edit
 // to selection would silently invalidate it.
+
+// nanoclaw-fork: Podman realization (rootful socket, nanogate topology).
+import './podman-driver.js';

@@ -12,6 +12,7 @@ export default defineConfig({
       'setup/**/*.test.ts',
       'scripts/**/*.test.ts',
       'container/*.test.ts',
+      'nanogate/test/**/*.test.ts',
       // A gateway skill's own scripts, tested where they live. NOT its
       // `payload/` — those files import as if already installed under `src/`,
       // so they only resolve once the skill has been applied, and the skill

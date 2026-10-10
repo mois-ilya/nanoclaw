@@ -1,0 +1,13 @@
+{
+  "version": "UNVERIFIED-placeholder-2026-10",
+  "_comment": "USD per million tokens. VERIFY EVERY NUMBER against https://www.anthropic.com/pricing before first deploy, then override nanogate.pricesFile. cacheWrite5m = 1.25x input, cacheWrite1h = 2x input, cacheRead = 0.1x input. serverTools are USD per single use.",
+  "models": {
+    "claude-haiku-5-5": { "input": 1, "output": 5, "cacheWrite5m": 1.25, "cacheWrite1h": 2, "cacheRead": 0.1 },
+    "claude-sonnet-5-5": { "input": 3, "output": 15, "cacheWrite5m": 3.75, "cacheWrite1h": 6, "cacheRead": 0.3 },
+    "claude-opus-5-5": { "input": 5, "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5 }
+  },
+  "serverTools": {
+    "web_search": 0.01,
+    "web_fetch": 0
+  }
+}

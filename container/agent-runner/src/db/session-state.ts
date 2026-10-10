@@ -81,6 +81,9 @@ export interface ReplyRoute {
   channelType: string | null;
   platformId: string | null;
   threadId: string | null;
+  /** nanoclaw-fork: the batch is a scheduled-task run (its output is never part of a user turn). */
+  taskRun?: boolean;
+  seriesId?: string | null;
 }
 
 /**
@@ -106,8 +109,11 @@ export function setCurrentReplyRoute(route: ReplyRoute | null): void {
     clearCurrentReplyRoute();
     return;
   }
-  const { inReplyTo, channelType, platformId, threadId } = route;
-  setValue(REPLY_ROUTE_KEY, JSON.stringify({ inReplyTo, channelType, platformId, threadId }));
+  const { inReplyTo, channelType, platformId, threadId, taskRun, seriesId } = route;
+  setValue(
+    REPLY_ROUTE_KEY,
+    JSON.stringify({ inReplyTo, channelType, platformId, threadId, ...(taskRun ? { taskRun: true } : {}), ...(seriesId ? { seriesId } : {}) }),
+  );
 }
 
 export function clearCurrentReplyRoute(): void {
@@ -125,6 +131,8 @@ export function getCurrentReplyRoute(): ReplyRoute | null {
       channelType: parsed.channelType ?? null,
       platformId: parsed.platformId ?? null,
       threadId: parsed.threadId ?? null,
+      ...(parsed.taskRun === true ? { taskRun: true } : {}),
+      ...(typeof parsed.seriesId === 'string' ? { seriesId: parsed.seriesId } : {}),
     };
   } catch {
     return null;
@@ -133,4 +141,33 @@ export function getCurrentReplyRoute(): ReplyRoute | null {
 
 export function getCurrentInReplyTo(): string | null {
   return getCurrentReplyRoute()?.inReplyTo ?? null;
+}
+
+// nanoclaw-fork: suggested-reply buttons for the current turn's final answer.
+//
+// `suggest_replies` runs in the MCP subprocess, the final chat row is written
+// by the poll loop (or by `send_message`), so the hand-over lives in mailbox
+// state. `writeMessageOut` stamps the pending list on the first user-visible
+// chat row of the turn (`nc.suggest`) and consumes it; the poll loop discards
+// leftovers at every turn boundary.
+const SUGGEST_KEY = 'nc_pending_suggest';
+
+export function setPendingSuggestions(replies: string[]): void {
+  setValue(SUGGEST_KEY, JSON.stringify(replies));
+}
+
+export function takePendingSuggestions(): string[] | null {
+  const row = getAgentMailbox().operations.getState(SUGGEST_KEY);
+  if (!row) return null;
+  deleteValue(SUGGEST_KEY);
+  try {
+    const parsed = JSON.parse(row.value);
+    return Array.isArray(parsed) && parsed.every((x) => typeof x === 'string') && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingSuggestions(): void {
+  deleteValue(SUGGEST_KEY);
 }

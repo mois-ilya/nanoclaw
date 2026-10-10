@@ -1,3 +1,6 @@
+packages:
+  - miniapp
+
 onlyBuiltDependencies:
   - esbuild
   - protobufjs

@@ -1,3 +1,4 @@
+import type { FailureClass } from '../failure-class.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 
 /**
@@ -161,7 +162,8 @@ export type ProviderEvent =
    * (e.g. a billing/quota notice), kept separate from model scratchpad and
    * raw diagnostics. Failures without `error` receive a generic notice.
    */
-  | { type: 'result'; text: string | null; isError?: boolean; error?: string }
+  // nanoclaw-fork: `failureClass` is the provider's classification of an error result (see failure-class.ts).
+  | { type: 'result'; text: string | null; isError?: boolean; error?: string; failureClass?: FailureClass }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a
@@ -182,4 +184,9 @@ export type ProviderEvent =
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
    */
-  | { type: 'activity' };
+  | { type: 'activity' }
+  // nanoclaw-fork: streaming text for live previews (see turn-telemetry.ts).
+  /** A token-level text delta of the assistant message currently streaming (top-level agent only). */
+  | { type: 'delta'; text: string }
+  /** A new assistant message began streaming: accumulated delta text restarts. */
+  | { type: 'delta_reset' };

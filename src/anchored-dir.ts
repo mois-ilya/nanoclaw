@@ -28,6 +28,18 @@ function errno(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | null)?.code;
 }
 
+/** A file exceeded the caller's read limit; carries the real size so the user can be told. */
+export class FileTooLargeError extends Error {
+  constructor(
+    readonly filename: string,
+    readonly size: number,
+    readonly maxBytes: number,
+  ) {
+    super(`'${filename}' is ${size} bytes, over the ${maxBytes} byte limit`);
+    this.name = 'FileTooLargeError';
+  }
+}
+
 export class AnchoredDir {
   private constructor(
     private readonly fd: number,
@@ -114,10 +126,18 @@ export class AnchoredDir {
     return fs.openSync(this.entryPath(name), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o666);
   }
 
-  /** Read the regular file `name`. Throws if it is missing, a symlink, or anything else. */
-  readFile(name: string): Buffer {
+  /**
+   * Read the regular file `name`. Throws if it is missing, a symlink, or anything else.
+   * With `maxBytes`, the size is checked on the descriptor first and a larger file is never read
+   * (throws FileTooLargeError) — the container controls these files, so the host must not buffer them blindly.
+   */
+  readFile(name: string, maxBytes?: number): Buffer {
     const fd = this.openReadFd(name);
     try {
+      if (maxBytes !== undefined) {
+        const size = fs.fstatSync(fd).size;
+        if (size > maxBytes) throw new FileTooLargeError(name, size, maxBytes);
+      }
       return fs.readFileSync(fd);
     } finally {
       fs.closeSync(fd);

@@ -19,7 +19,7 @@ import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
-import { startHostModules, stopHostModules } from './host-lifecycle.js';
+import { runHostPrepare, startHostModules, stopHostModules } from './host-lifecycle.js';
 import { startGatewayApprovalCoordinator, stopGatewayApprovalCoordinator } from './gateway-approval-coordinator.js';
 import { startGatewayAvailabilityMonitor } from './gateway-availability.js';
 import { getGatewayProvider } from './gateway-providers/index.js';
@@ -105,7 +105,8 @@ async function main(): Promise<void> {
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
-        inboundReady
+        // nanoclaw-fork: return the promise — the adapter awaits it and only then marks its update-journal row done.
+        return inboundReady
           .then(() =>
             routeInbound({
               channelType: adapter.channelType,
@@ -126,10 +127,11 @@ async function main(): Promise<void> {
           )
           .catch((err) => {
             log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
+            throw err; // nanoclaw-fork
           });
       },
       onInboundEvent(event) {
-        inboundReady
+        return inboundReady
           .then(() => routeInbound(event))
           .catch((err) => {
             log.error('Failed to route inbound event', {
@@ -137,6 +139,7 @@ async function main(): Promise<void> {
               targetChannelType: event.channelType,
               err,
             });
+            throw err; // nanoclaw-fork
           });
       },
       onMetadata(platformId, name, isGroup) {
@@ -182,6 +185,7 @@ async function main(): Promise<void> {
     stopGatewaySessionsForUnavailability,
     resumeGatewaySessionAdmission,
   );
+  await runHostPrepare({ db, deliveryAdapter, signal: hostAbortController.signal }); // nanoclaw-fork
   await adoptRunningSessions();
   releaseInbound();
 

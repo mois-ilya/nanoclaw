@@ -120,6 +120,14 @@ function buildDestinationsSection(mode: SessionMode): string {
         `For user-visible escalation output, default to your own channel destination(s): ${channelNames} — that's the operator's actual conversation with you. Use an agent-type destination like \`parent\` only when the task explicitly calls for routing through another agent, not as your default escalation path.`,
       );
     }
+    // nanoclaw-fork: the user's DM is the only channel — a task without an
+    // explicit "send to the user" must still reach them (ux §2.6).
+    if (channelDestinations.length === 1) {
+      lines.push(
+        '',
+        `Это напоминание или задача пользователя: результат отправь через \`send_message({ to: "${channelDestinations[0].name}", text: "..." })\`. Для напоминания используй \`send_reminder\` (кнопки «Сделано» / «Отложить на час»). Если отправлять нечего (тихий прогон, ничего нового) — ничего не отправляй.`,
+      );
+    }
     lines.push(
       '',
       `Your final output is not sent to the user. End with a concise work-log summary. It is recorded automatically in \`tasks/${mode.taskId}.md\`. Read that file when you need context from earlier runs. Use \`ncl tasks append-log --msg "…"\` only for optional mid-run notes.`,
@@ -135,12 +143,14 @@ function buildDestinationsSection(mode: SessionMode): string {
     'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
   );
   lines.push('');
+  // nanoclaw-fork: progress is drawn by the host (live draft, steps, Stop button);
+  // an interim message would be taken as the turn's final answer and end that UI.
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'The `send_message` MCP tool is the same delivery, available mid-turn. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation.',
   );
   lines.push('');
   lines.push(
-    'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
+    'Progress is shown to the user automatically. Do not send acknowledgments ("on it", "сейчас посмотрю") or status updates; deliver exactly one `<message>` with the final answer per turn (plus files). Never narrate; finish with the outcome, not a play-by-play.',
   );
   return lines.join('\n');
 }

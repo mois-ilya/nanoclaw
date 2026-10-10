@@ -20,6 +20,16 @@ import { ALLOW, DENY, HOLD, type GuardedActionSpec, type GuardInput } from '../g
 import { normalizeArgs } from './args.js';
 import { GROUP_SCOPE_RESOURCES, type CommandDef } from './registry.js';
 
+/**
+ * nanoclaw-fork: narrows `cli_scope: group` further for some groups (friends: tasks and their own settings only,
+ * plan v8 M9). Returns the allowed resources, or null for "no extra restriction".
+ */
+export type GroupResourceFilter = (agentGroupId: string) => Promise<ReadonlySet<string> | null>;
+let groupResourceFilter: GroupResourceFilter | null = null;
+export function setGroupResourceFilter(fn: GroupResourceFilter | null): void {
+  groupResourceFilter = fn;
+}
+
 const GROUP_WIRING_COMMANDS = new Set(['wirings-get', 'wirings-update']);
 const GROUP_WIRING_UPDATE_ARGS = new Set(['id', 'agent_group_id', 'group', 'help', 'engage_mode', 'engage_pattern']);
 
@@ -79,6 +89,13 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
     // Only allow whitelisted resources and general commands (no resource, like help)
     if (cmd.resource && !GROUP_SCOPE_RESOURCES.has(cmd.resource) && !groupWiringCommand) {
       return DENY(`CLI access is scoped to this agent group. Cannot access "${cmd.resource}".`);
+    }
+
+    if (cmd.resource && groupResourceFilter) {
+      const narrowed = await groupResourceFilter(actor.agentGroupId);
+      if (narrowed && !narrowed.has(cmd.resource)) {
+        return DENY(`This agent may only use: ${[...narrowed].join(', ')}. Cannot access "${cmd.resource}".`);
+      }
     }
 
     // Enforce group scope on all agent-group-related args.

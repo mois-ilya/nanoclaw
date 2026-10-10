@@ -94,6 +94,11 @@ export interface ContainerSpec {
   mounts: MountSpec[];
   /** Stamped onto the realized object in addition to the canonical key labels. */
   labels?: Record<string, string>;
+  // nanoclaw-fork: per-container caps for AUXILIARY containers. The session's
+  // `resources` size the agent; a gateway relay must not inherit them (the
+  // podman driver applies these, or a small default, to non-agent roles).
+  // The docker driver ignores the field, so upstream behavior is unchanged.
+  resources?: { memoryMb?: number; cpus?: string; pidsLimit?: number };
   // No raw runtime flags here, ever: network topology is driver-private (the
   // Docker realization's `networkArgsFor`), and everything a gateway used to
   // append as raw `-e`/`-v` rides the typed lanes above, where admission can

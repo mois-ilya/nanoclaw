@@ -10,7 +10,7 @@ import type { AgentProvider, ProviderEvent, ProviderExchange } from './providers
 
 const CONTRACT = { textDelivery: 'mid-turn-complete', commands: { formatting: 'xml' } } as const;
 const DIAGNOSTIC = 'Private native provider diagnostic';
-const NOTICE = 'The agent run failed. Check the logs for details.';
+const NOTICE = 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.';
 
 function insertMessage(id: string, threadId: string, kind = 'chat', text = id): void {
   getInboundDb()

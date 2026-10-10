@@ -7,6 +7,7 @@
  */
 import './core.js';
 import './interactive.js';
+import './product.js'; // nanoclaw-fork: suggest_replies, send_reminder, send_task_created
 import './agents.js';
 import './self-mod.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.

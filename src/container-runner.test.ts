@@ -176,6 +176,17 @@ describe('composeSessionSpec', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
   });
 
+  it('product env (the per-tenant turn limit) rides the composed lane', async () => {
+    const { setSessionEnvProvider } = await import('./session-env.js');
+    setSessionEnvProvider((g) => ({ NC_TURN_TIMEOUT_MS: g.id === 'ag-1' ? '600000' : '1' }));
+    try {
+      expect(compose().containers[0].env.NC_TURN_TIMEOUT_MS).toBeDefined();
+    } finally {
+      setSessionEnvProvider(undefined);
+    }
+    expect(compose().containers[0].env.NC_TURN_TIMEOUT_MS).toBeUndefined();
+  });
+
   it('the gateway contribution fills the contributed lane last and wins a collision', () => {
     const spec = compose({
       contribution: { env: { HTTPS_PROXY: 'http://provider:1' } },

@@ -459,8 +459,10 @@ describe('error result with no <message> envelope', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content)).toEqual({
-      text: 'The agent run failed. Check the logs for details.',
+      text: 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
       failureNotice: true,
+      failureClass: 'internal',
+      nc: { turnId: 'm1' },
     });
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
@@ -477,7 +479,7 @@ describe('error result with no <message> envelope', () => {
     const exchanges: ProviderExchange[] = [];
     await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
     expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
-      'The agent run failed. Check the logs for details.',
+      'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
     ]);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -486,8 +488,8 @@ describe('error result with no <message> envelope', () => {
   });
 
   it.each([
-    ['provider error', 'billing hard-stop', 'billing hard-stop'],
-    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+    ['provider error', 'billing hard-stop', 'Error result — notice not sent on this route (internal)'],
+    ['fallback text', undefined, 'Error result — notice not sent on this route (internal)'],
   ])('logs a skipped notice once when answering a failure notice: %s', async (_label, error, expected) => {
     const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
     const noticeRouting = { ...AGENT_ROUTING, failureNoticeWake: true };
@@ -566,7 +568,11 @@ describe('a2a failure notices (never answer a notice with a notice)', () => {
     const toA = agentOutbound();
     expect(toA).toHaveLength(1);
     expect(toA[0].platform_id).toBe('ag-a');
-    expect(JSON.parse(toA[0].content)).toEqual({ text: 'Incorrect API key', failureNotice: true });
+    expect(JSON.parse(toA[0].content)).toEqual({
+      text: 'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
+      failureNotice: true,
+      failureClass: 'internal',
+    });
 
     // A's session: the notice arrives from B and A's turn fails too.
     routeToSession(toA[0].content, 'ag-b', 'a2a-2');
@@ -683,7 +689,7 @@ it('delivers completed wrapped text while recording the failed turn exactly once
 
   expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
     'Completed before failure.',
-    'The agent run failed. Check the logs for details.',
+    'Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.',
   ]);
   expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
   expect(pushes).toHaveLength(0);

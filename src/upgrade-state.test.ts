@@ -164,3 +164,45 @@ describe('git-less runtimes', () => {
     expect(isUpgradeCurrent()).toBe(false);
   });
 });
+
+// nanoclaw-fork: Nix builds carry NANOCLAW_BUILD_ID instead of a git checkout.
+describe('upgrade-state with NANOCLAW_BUILD_ID', () => {
+  afterEach(() => {
+    delete process.env.NANOCLAW_BUILD_ID;
+  });
+
+  it('identity is {version, buildId}; git is not consulted', () => {
+    process.env.NANOCLAW_BUILD_ID = 'abc123-nix';
+    expect(getCodeIdentity()).toEqual({
+      version: getCodeVersion(),
+      commit: 'unknown',
+      tree: 'unknown',
+      buildId: 'abc123-nix',
+    });
+  });
+
+  it('set writes the buildId and the tripwire accepts the same build', () => {
+    process.env.NANOCLAW_BUILD_ID = 'abc123-nix';
+    const written = writeUpgradeState({ via: 'nix' });
+    expect(written.buildId).toBe('abc123-nix');
+    expect(readUpgradeState()?.buildId).toBe('abc123-nix');
+    expect(isUpgradeCurrent()).toBe(true);
+  });
+
+  it('a different build id trips, even with a matching version', () => {
+    process.env.NANOCLAW_BUILD_ID = 'abc123-nix';
+    writeUpgradeState({ via: 'nix' });
+    process.env.NANOCLAW_BUILD_ID = 'def456-nix';
+    expect(isUpgradeCurrent()).toBe(false);
+  });
+
+  it('a marker without a buildId trips under a Nix build', () => {
+    writeUpgradeState({ via: 'git-era' });
+    process.env.NANOCLAW_BUILD_ID = 'abc123-nix';
+    expect(isUpgradeCurrent()).toBe(false);
+  });
+
+  it('without the env var the git comparison is unchanged and no buildId is written', () => {
+    expect(writeUpgradeState({ via: 'test' }).buildId).toBeUndefined();
+  });
+});

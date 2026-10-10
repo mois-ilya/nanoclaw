@@ -43,7 +43,8 @@ export function isFailureNotice(msg: MessageInRow): boolean {
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
 /** Commands the runner itself handles, whatever provider is active. */
-const RUNNER_ADMIN_COMMANDS = ['/clear', '/upload-trace'];
+// nanoclaw-fork: '/stop' aborts the active turn (handled in poll-loop; host gate leaves it open to members).
+const RUNNER_ADMIN_COMMANDS = ['/clear', '/upload-trace', '/stop'];
 
 interface CommandSets {
   admin: ReadonlySet<string>;
@@ -134,6 +135,12 @@ export function isClearCommand(msg: MessageInRow): boolean {
   return slashCommandName(commandText(msg.content)) === '/clear';
 }
 
+/** nanoclaw-fork: /stop — abort the active turn, keep the continuation. */
+export function isStopCommand(msg: MessageInRow): boolean {
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
+  return slashCommandName(commandText(msg.content)) === '/stop';
+}
+
 /**
  * True for any chat that needs the outer loop's command path: /clear plus
  * admin/passthrough slash commands the SDK can only dispatch when they are
@@ -172,6 +179,8 @@ export interface RoutingContext {
   taskRun: boolean;
   /** Every non-echo row that woke this turn is a failure notice. */
   failureNoticeWake?: boolean;
+  /** nanoclaw-fork: series of the task row that woke a task run. */
+  seriesId?: string | null;
 }
 
 /**
@@ -199,6 +208,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
     // Accumulated trigger=0 context rides along but did not wake the turn.
     failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
+    seriesId: messages.find((m) => m.kind === 'task')?.series_id ?? null,
   };
 }
 

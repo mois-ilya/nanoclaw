@@ -40,6 +40,15 @@ export interface GatewaySessionInput {
    * composes containers checks `auxiliaryContainers` and degrades or refuses.
    */
   capabilities: DriverCapabilities;
+  /** 'task' when the session thread is a scheduled-task thread; omitted for ordinary chat sessions. */
+  purpose?: 'task';
+}
+
+/** Gateway purpose for a session thread: 'task' for `system:tasks[:<id>]` threads. */
+export function gatewayPurposeForThread(threadId: string | null | undefined): 'task' | undefined {
+  return typeof threadId === 'string' && (threadId === 'system:tasks' || threadId.startsWith('system:tasks:'))
+    ? 'task'
+    : undefined;
 }
 
 export function gatewayRuntimeIdentity(key: SessionKey): string {

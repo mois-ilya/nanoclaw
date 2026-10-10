@@ -15,3 +15,5 @@ import './dropped-messages.js';
 import './approvals.js';
 import './sessions.js';
 import './tasks.js';
+// nanoclaw-fork: product commands (set-timezone, guest-append).
+import './nc.js';

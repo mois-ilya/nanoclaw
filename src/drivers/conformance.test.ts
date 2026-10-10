@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DockerSessionDriver } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
+import { PodmanSessionDriver } from './podman-driver.js';
 import { withSessionEvents, type SessionEventsDriver } from './session-events.js';
 import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
 import { GROUP_FOLDER_LABEL, LABELS, validateSpec, type DriverCapabilities, type SessionSpec } from './types.js';
@@ -56,17 +57,76 @@ type Harness = {
   realize(spec: SessionSpec): Promise<Realized>;
   /** Make the next realization fail with a runtime message of the given shape. */
   failWith(message: string): void;
+  /** Declared capability, not a driver-identity branch: false where there is no build daemon. */
+  imageBuild: boolean;
+  /** Responses that make the fake runtime's inspect output match a correctly realized two-container topology. */
+  auxResponses?: FakeCli['responses'];
 };
 
 function dockerHarness(): Harness {
   const cli = new FakeCli('docker');
-  cli.responses = [{ match: /^inspect /, throws: new Error('No such object') }];
   // Wrapped exactly as `createSessionDriver` wraps it in production: the
   // conformance surface is the seam consumers see, and `onTerminal` lives in
   // the session-events hub, not in any driver.
-  const driver = withSessionEvents(new DockerSessionDriver({ ...FIXTURE_POLICY, cli }));
+  return harnessFor('docker', cli, withSessionEvents(new DockerSessionDriver({ ...FIXTURE_POLICY, cli })), true);
+}
+
+// nanoclaw-fork: the same floor, run against the Podman realization. The
+// fail-closed gate is opened (`allowUngated`) because the shared fixtures use a
+// host network target; the gate itself is covered in podman-driver.test.ts.
+function podmanHarness(): Harness {
+  const cli = new FakeCli('podman');
+  return harnessFor(
+    'podman',
+    cli,
+    withSessionEvents(new PodmanSessionDriver({ ...FIXTURE_POLICY, cli, allowUngated: true })),
+    false,
+    [
+      // Podman verifies the topology it realized (inspect JSON), so a spec with an
+      // auxiliary container needs the fake to report the topology the driver built.
+      {
+        match: /^inspect --type container ncl-spike-s1-egress-proxy$/,
+        output: JSON.stringify([
+          {
+            NetworkSettings: {
+              Networks: { 'ncl-spike-s1-private': { Aliases: ['egress-proxy'] }, 'nanogate-svc': { Aliases: [] } },
+            },
+            HostConfig: { NetworkMode: 'nanogate-svc' },
+          },
+        ]),
+      },
+      {
+        match: /^inspect --type container ncl-spike-s1$/,
+        output: JSON.stringify([
+          {
+            NetworkSettings: { Networks: { 'ncl-spike-s1-private': {} } },
+            HostConfig: { NetworkMode: 'ncl-spike-s1-private' },
+          },
+        ]),
+      },
+      {
+        match: /^network inspect ncl-spike-s1-private$/,
+        output: JSON.stringify([{ internal: true, options: { isolate: 'true' } }]),
+      },
+      { match: /^network exists /, throws: new Error('exit status 1') },
+      { match: /^network ls --format/, output: '' },
+      { match: /^inspect /, throws: new Error('No such object') },
+    ],
+  );
+}
+
+function harnessFor(
+  name: string,
+  cli: FakeCli,
+  driver: SessionEventsDriver,
+  imageBuild: boolean,
+  auxResponses?: FakeCli['responses'],
+): Harness {
+  cli.responses = [{ match: /^inspect /, throws: new Error('No such object') }];
   return {
-    name: 'docker',
+    name,
+    imageBuild,
+    auxResponses,
     driver,
     cli,
     async realize(spec) {
@@ -106,7 +166,7 @@ function dockerHarness(): Harness {
 let harnesses: Harness[];
 beforeEach(() => {
   vi.clearAllMocks();
-  harnesses = [dockerHarness()];
+  harnesses = [dockerHarness(), podmanHarness()];
 });
 
 /**
@@ -314,6 +374,7 @@ describe('conformance: the multi-container contract (validateSpec is the shared 
     // Never a silent subset: realizing only the agent would validate
     // containers that never exist — false semantics on a public contract.
     if (h.driver.capabilities().auxiliaryContainers) {
+      if (h.auxResponses) h.cli.responses = h.auxResponses;
       await expect(h.driver.prepare(fixtureSpecWithAux())).resolves.toBeDefined();
       return;
     }
@@ -781,7 +842,8 @@ describe('conformance: capabilities are honest', () => {
     expect(capabilities.networkPolicy).toBe('topology');
     expect(capabilities.sharedNetworkNamespace).toBe(false);
     expect(capabilities.auxiliaryContainers).toBe(true);
-    // The session daemon doubles as the build daemon: rebuild-in-place works.
-    expect(capabilities.imageBuild).toBe(true);
+    // Docker: the session daemon doubles as the build daemon, so rebuild-in-place
+    // works. Podman (nanoclaw-fork): images arrive pre-imported, no build daemon.
+    expect(capabilities.imageBuild).toBe(h.imageBuild);
   });
 });

@@ -11,6 +11,7 @@ import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
+import { contentForLog } from '../log-policy.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -206,7 +207,8 @@ export const askUserQuestion: McpToolDefinition = {
       }),
     });
 
-    log(`ask_user_question: ${questionId} → "${question}" [${options.join(', ')}]`);
+    // nanoclaw-fork: NANOCLAW_LOG_CONTENT=0 keeps question text and options out of the log.
+    log(`ask_user_question: ${questionId} → ${contentForLog(`"${question}" [${options.join(', ')}]`, 300)}`);
 
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
@@ -219,7 +221,7 @@ export const askUserQuestion: McpToolDefinition = {
         // Mark the response as completed via processing_ack (outbound.db)
         markCompleted([response.id]);
 
-        log(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
+        log(`ask_user_question response: ${questionId} → ${contentForLog(String(parsed.selectedOption), 100)}`);
         return ok(parsed.selectedOption);
       }
 

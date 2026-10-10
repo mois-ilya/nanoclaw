@@ -31,8 +31,15 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { noteReplyDelivered } from './reply-ledger.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
+import {
+  clearOutbox,
+  OUTBOX_FILE_MAX_BYTES,
+  readOutboxFiles,
+  withExistingMailboxSession,
+  type OutboxProblem,
+} from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
@@ -302,6 +309,8 @@ async function drainSession(session: Session): Promise<void> {
       );
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
+      // nanoclaw-fork: a chat reply reached the user — a crash retry of this turn must not re-run it.
+      if (msg.kind === 'chat' && msg.channelType !== 'agent') noteReplyDelivered(session.id, msg.inReplyTo);
       await clearAttemptRow(msg.id);
       if (msg.kind !== 'system' && msg.channelType !== 'agent') {
         pauseTypingRefreshAfterDelivery(session.id);
@@ -529,17 +538,25 @@ async function deliverMessage(
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
+  // nanoclaw-fork: files over the limit are not read; every file that cannot go out is named in the text.
+  const outboxProblems: OutboxProblem[] = [];
   const files =
     Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
+      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[], outboxProblems)
       : undefined;
+  let outContent = msg.content;
+  if (outboxProblems.length > 0) {
+    const note = outboxProblems.map(outboxProblemNote).join('\n');
+    const text = typeof content.text === 'string' && content.text.trim() ? `${content.text}\n\n${note}` : note;
+    outContent = JSON.stringify({ ...content, text });
+  }
 
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
     msg.threadId,
     msg.kind,
-    msg.content,
+    outContent,
     files,
     deliverInstance,
   );
@@ -694,9 +711,21 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * These are written to messages_out because the container can't write to inbound.db.
  * The host applies them to inbound.db here.
  */
+export function outboxProblemNote(p: OutboxProblem): string {
+  return p.reason === 'too-large'
+    ? `Не получилось отправить файл «${p.filename}»: он больше ${Math.round(OUTBOX_FILE_MAX_BYTES / (1024 * 1024))} МБ.`
+    : `Не получилось отправить файл «${p.filename}».`;
+}
+
+const QUIET_SYSTEM_ACTIONS = new Set(['turn', 'preview', 'progress']);
+
 async function handleSystemAction(content: Record<string, unknown>, session: Session): Promise<void> {
   const action = content.action as string;
-  log.info('System action from agent', { sessionId: session.id, action });
+  // nanoclaw-fork: UI telemetry rows arrive every ~700 ms per streaming turn; keep them out of the info log.
+  (QUIET_SYSTEM_ACTIONS.has(action) ? log.debug : log.info).call(log, 'System action from agent', {
+    sessionId: session.id,
+    action,
+  });
 
   const registered = getDeliveryAction(action);
   if (registered) {

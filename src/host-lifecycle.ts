@@ -18,8 +18,28 @@ export interface HostStartContext {
 export type HostStartCallback = (ctx: HostStartContext) => void | Promise<void>;
 export type HostShutdownCallback = () => void | Promise<void>;
 
+const prepareCallbacks: HostStartCallback[] = [];
 const startCallbacks: HostStartCallback[] = [];
 const shutdownCallbacks: HostShutdownCallback[] = [];
+
+/**
+ * nanoclaw-fork: runs after DB + delivery are ready but BEFORE running containers are adopted. For state
+ * adoption depends on (the product module's tenant map); anything slow or optional belongs in onHostStart.
+ * A throwing callback is logged and skipped.
+ */
+export function onHostPrepare(cb: HostStartCallback): void {
+  prepareCallbacks.push(cb);
+}
+
+export async function runHostPrepare(ctx: HostStartContext): Promise<void> {
+  for (const cb of [...prepareCallbacks]) {
+    try {
+      await cb(ctx);
+    } catch (err) {
+      log.error('Host module prepare callback threw', { err });
+    }
+  }
+}
 
 export function onHostStart(cb: HostStartCallback): void {
   startCallbacks.push(cb);

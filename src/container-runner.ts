@@ -7,6 +7,9 @@
  * here is composition and lifecycle policy: which mounts, which env, restart
  * ordering, exit bookkeeping.
  */
+import { sessionEnvFor } from './session-env.js'; // nanoclaw-fork
+import { failTurnsForSession } from './channels/telegram/adapter/runtime.js';
+import { emitHostError } from './host-errors.js'; // nanoclaw-fork
 import { exec } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -19,6 +22,7 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_MEMORY_LIMIT,
   CONTAINER_PIDS_LIMIT,
+  CONTAINER_SHM_MB,
   DATA_DIR,
   GROUPS_DIR,
   INSTALL_SLUG,
@@ -27,7 +31,8 @@ import {
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+// nanoclaw-fork: runtime binary+argv prefix are configurable (container-runtime.ts)
+import { CONTAINER_RUNTIME_CMD } from './container-runtime.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -48,6 +53,7 @@ import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-eve
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
 import {
+  gatewayPurposeForThread,
   gatewayRuntimeIdentity,
   getGatewayProvider,
   selectGatewayAgentSkills,
@@ -55,6 +61,7 @@ import {
   type GatewaySessionInput,
   type GatewaySessionLease,
 } from './gateway-providers/index.js';
+import { admitSpawn, dropQueuedWake, drainSpawnQueue, queuedWakeCount, releaseSpawnSlot, requestIdlePreempt } from './spawn-admission.js'; // nanoclaw-fork
 import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -97,7 +104,8 @@ import type { AgentGroup, Session } from './types.js';
  * agent-browser passes --disable-dev-shm-usage, but a third-party puppeteer or
  * Playwright launcher may not.
  */
-const SHM_SIZE_MB = 1024;
+// nanoclaw-fork: configurable via CONTAINER_SHM_MB (default stays 1024).
+const SHM_SIZE_MB = CONTAINER_SHM_MB;
 /** Grace before SIGKILL. One second, as `docker stop -t 1` has always been. */
 const STOP_GRACE_SECONDS = 1;
 
@@ -207,6 +215,15 @@ async function releaseClaimQuietly(sessionId: string, incarnation: number): Prom
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** nanoclaw-fork: a slot may have freed up — start queued wakes (owner first). */
+function drainWakeQueue(): void {
+  drainSpawnQueue(new Set(activeContainers.keys()), (queued) => {
+    void wakeContainer(queued);
+  });
+  // Still queued: warm idle containers may be holding the slots — stop one.
+  if (queuedWakeCount() > 0) requestIdlePreempt(new Set(activeContainers.keys()));
+}
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
@@ -237,6 +254,7 @@ export function stopGatewaySessionsForUnavailability(reason: string): void {
   gatewayUnavailableReason = reason;
   gatewayAdmissionGeneration++;
   log.error('Gateway unavailable; stopping active sessions', { reason, sessions: activeContainers.size });
+  emitHostError('gateway', 'gateway', reason); // nanoclaw-fork
   for (const sessionId of activeContainers.keys()) killContainer(sessionId, 'gateway-unavailable');
 }
 
@@ -296,6 +314,7 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       groupName: group.name,
       containerName: snapshot.handle.name,
       capabilities: driver.capabilities(),
+      purpose: gatewayPurposeForThread(session.thread_id),
     });
   } catch (err) {
     await releaseClaimQuietly(session.id, claimIncarnation);
@@ -329,6 +348,8 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
 export function wakeContainer(session: Session): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
+    releaseSpawnSlot(session.id); // nanoclaw-fork
+    dropQueuedWake(session.id);
     return Promise.resolve(true);
   }
   const existing = wakePromises.get(session.id);
@@ -336,14 +357,22 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
+  // nanoclaw-fork: NC_MAX_CONTAINERS — over the cap the wake is queued (owner first); the queue restarts it.
+  if (!admitSpawn(session, new Set(activeContainers.keys()))) {
+    requestIdlePreempt(new Set(activeContainers.keys()));
+    return Promise.resolve(false);
+  }
   const promise = spawnContainer(session)
     .then(() => true)
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      emitHostError('container', session.id, err instanceof Error ? err.message.slice(0, 200) : 'wake failed'); // nanoclaw-fork
       return false;
     })
     .finally(() => {
       wakePromises.delete(session.id);
+      releaseSpawnSlot(session.id); // nanoclaw-fork
+      drainWakeQueue();
     });
   wakePromises.set(session.id, promise);
   return promise;
@@ -405,6 +434,7 @@ async function spawnContainer(session: Session): Promise<void> {
     groupName: agentGroup.name,
     containerName,
     capabilities: driver.capabilities(),
+    purpose: gatewayPurposeForThread(session.thread_id),
   });
   const admissionGeneration = gatewayAdmissionGeneration;
   const gateway = gatewaySession.lease.contribution;
@@ -695,6 +725,7 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
       });
       if (activeContainers.get(sessionId) === runtime) {
         activeContainers.delete(sessionId);
+        drainWakeQueue(); // nanoclaw-fork
       }
       return;
     }
@@ -720,6 +751,14 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   } catch (err) {
     log.error('Failed to stop typing refresh', { sessionId, containerName, err });
   }
+  // nanoclaw-fork: an open Telegram turn of this session can no longer be answered — tell the user now
+  // instead of waiting for the idle watchdog. No-op when the adapter is not running.
+  try {
+    // quiet: the crash copy is owned by reconcile-session (retry once silently, or noticeGaveUp).
+    failTurnsForSession(sessionId, { quiet: true });
+  } catch (err) {
+    log.error('Failed to fail open turns of the ended session', { sessionId, containerName, err });
+  }
 
   if (failure && failure.kind !== 'started-then-died') {
     log.error('Session failed', { sessionId, containerName, kind: failure.kind, retryable: failure.retryable });
@@ -733,6 +772,7 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
 
   if (activeContainers.get(sessionId) === runtime) {
     activeContainers.delete(sessionId);
+    drainWakeQueue(); // nanoclaw-fork
   }
   if (runtime.claimIncarnation !== undefined) {
     await releaseClaimQuietly(sessionId, runtime.claimIncarnation);
@@ -847,6 +887,7 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
         groupName: agentGroup.name,
         containerName: handle.name,
         capabilities: driver.capabilities(),
+        purpose: gatewayPurposeForThread(session.thread_id),
       });
       await driver.reconcileNetworkAccess?.(gatewaySession.lease.contribution.networkAccess);
     } catch (err) {
@@ -1286,6 +1327,10 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const env: Record<string, string> = {
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
+    // nanoclaw-fork: runner-side switches follow the host's (log privacy, turn/preview/progress rows)
+    ...(process.env.NANOCLAW_LOG_CONTENT === '0' ? { NANOCLAW_LOG_CONTENT: '0' } : {}),
+    ...(process.env.NANOCLAW_TURN_TELEMETRY === '0' ? { NANOCLAW_TURN_TELEMETRY: '0' } : {}),
+    ...sessionEnvFor(agentGroup),
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
@@ -1361,6 +1406,8 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
       memoryMb: parseMemoryMb(CONTAINER_MEMORY_LIMIT),
       pidsLimit: parsePidsLimit(CONTAINER_PIDS_LIMIT),
       shmSizeMb: SHM_SIZE_MB,
+      // nanoclaw-fork: TODO per-group overrides from container_configs (memory/cpus) -
+      // not wired yet; today all sessions share the install-wide CONTAINER_* limits.
     },
     // The group's configured tier; the driver refuses one it cannot realize
     // (validateSpec, against capabilities().isolationTiers).
@@ -1482,7 +1529,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   // all and an id is unambiguous either way.
   let baseId = '';
   try {
-    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
+    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_CMD} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
     baseId = stdout.trim();
   } catch {
     // Non-fatal: the build below fails on its own if the base is really absent.
@@ -1522,7 +1569,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   try {
     // Awaited async exec so the single-threaded host stays responsive during
     // the build (can take minutes) instead of blocking on execSync.
-    await execAsync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
+    await execAsync(`${CONTAINER_RUNTIME_CMD} build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
       timeout: 900_000,
     });

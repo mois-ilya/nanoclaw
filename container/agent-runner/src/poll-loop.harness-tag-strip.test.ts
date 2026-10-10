@@ -127,7 +127,7 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe('Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });
@@ -145,7 +145,8 @@ it('sanitizes the dedicated provider error field without delivering private resu
 
   const out = getUndeliveredMessages();
   expect(out).toHaveLength(1);
-  expect(JSON.parse(out[0].content).text).toBe('Please try again later.');
+  expect(JSON.parse(out[0].content).text).toBe('Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.');
+  expect(out[0].content).not.toContain('invoke');
   expect(out[0].content).not.toContain('Private raw transport diagnostic');
   expect(pushes).toHaveLength(0);
 });

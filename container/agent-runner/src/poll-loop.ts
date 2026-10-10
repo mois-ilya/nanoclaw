@@ -14,6 +14,7 @@ import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
   clearCurrentReplyRoute,
+  clearPendingSuggestions,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentReplyRoute,
@@ -24,12 +25,17 @@ import {
   categorizeMessage,
   FAILURE_NOTICE_FIELD,
   isClearCommand,
+  isStopCommand,
   isRunnerCommand,
   isSessionEcho,
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+// nanoclaw-fork: typed turn telemetry + log privacy switch
+import { contentForLog } from './log-policy.js';
+import { turnTelemetry } from './turn-telemetry.js';
+import { classifyFailure, FAILURE_COPY, type FailureClass } from './failure-class.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -169,14 +175,43 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
-        await writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: 'Session cleared.' }),
-        });
+        // nanoclaw-fork: the host already confirmed a /new it injected (content.nc.silent),
+        // and NANOCLAW_CLEAR_TEXT (empty = none) localizes the confirmation otherwise.
+        const clearText = clearConfirmation(msg);
+        if (clearText) {
+          await writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: clearText }),
+          });
+        }
+        commandIds.push(msg.id);
+        continue;
+      }
+      // nanoclaw-fork: /stop. The follow-up poller already aborted the active
+      // query (real interrupt, continuation kept); here we only surface the
+      // partial answer. Members may stop their own turn (host gate: not admin).
+      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isStopCommand(msg)) {
+        log('Stop requested');
+        const stopped = turnTelemetry.takeStopped();
+        if (stopped) {
+          const note = '⏹ Остановлено — ответ неполный';
+          await writeMessageOut({
+            id: generateId(),
+            in_reply_to: stopped.routing.inReplyTo,
+            kind: 'chat',
+            platform_id: stopped.routing.platformId,
+            channel_type: stopped.routing.channelType,
+            thread_id: stopped.routing.threadId,
+            content: JSON.stringify({
+              markdown: stopped.partial ? `${stopped.partial}\n\n${note}` : '⏹ Остановлено',
+              nc: { stopped: true },
+            }),
+          });
+        }
         commandIds.push(msg.id);
         continue;
       }
@@ -310,6 +345,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   }
 }
 
+/** nanoclaw-fork: text confirming a /clear, or null when it should stay silent. */
+export function clearConfirmation(msg: MessageInRow): string | null {
+  try {
+    if (JSON.parse(msg.content)?.nc?.silent === true) return null;
+  } catch {
+    // unparseable content: fall through to the default confirmation
+  }
+  const configured = process.env.NANOCLAW_CLEAR_TEXT;
+  if (configured === undefined) return 'Session cleared.';
+  return configured.trim() || null;
+}
+
 /**
  * Format messages, handling passthrough commands differently.
  * When the provider handles slash commands natively (Claude Code),
@@ -423,23 +470,59 @@ export async function processQuery(
   // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
   type QueuedTurn = {
+    /** nanoclaw-fork: id of the first inbound row of the turn's batch (telemetry). */
+    turnId?: string;
     routing: RoutingContext;
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
   };
   const queuedTurns: QueuedTurn[] = [];
+  // nanoclaw-fork: per-turn wall-clock limit (friend 10 min / owner 30 min, set
+  // by the host through NC_TURN_TIMEOUT_MS). Armed when a turn starts answering,
+  // disarmed at its result. Expiry takes the /stop path (real interrupt,
+  // continuation kept) and then reports what was done so far.
+  const turnTimeoutMs = Number(process.env.NC_TURN_TIMEOUT_MS) > 0 ? Number(process.env.NC_TURN_TIMEOUT_MS) : 0;
+  let turnTimer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let timedOutRouting: RoutingContext | null = null;
+  let timedOutTurnId: string | undefined;
+  const clearTurnTimer = (): void => {
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = null;
+  };
+  const armTurnTimer = (): void => {
+    clearTurnTimer();
+    if (!turnTimeoutMs || done || timedOut) return;
+    turnTimer = setTimeout(() => {
+      turnTimer = null;
+      if (done || !answering || endedForCommand) return;
+      log(`Turn exceeded ${turnTimeoutMs} ms — aborting`);
+      timedOut = true;
+      endedForCommand = true;
+      timedOutRouting = { ...routing };
+      timedOutTurnId = currentTurnId;
+      query.abort();
+    }, turnTimeoutMs);
+    (turnTimer as { unref?: () => void }).unref?.();
+  };
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
     publishReplyRoute(routing);
     answering = true;
+    currentTurnId = next.turnId; // nanoclaw-fork
+    turnTelemetry.beginTurn(next.turnId, routing);
+    armTurnTimer(); // nanoclaw-fork
   };
+  // nanoclaw-fork: the opening batch's turn is already answering.
+  if (answering) turnTelemetry.beginTurn(initialBatchIds[0], routing);
+  let currentTurnId: string | undefined = initialBatchIds[0];
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string): void => {
     query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged });
+    queuedTurns.push({ turnId: currentTurnId, routing: { ...routing }, unwrappedNudged, taskBlockNudged });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -454,6 +537,7 @@ export async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  let stopAborted = false; // nanoclaw-fork
   let mailboxFailureStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
@@ -461,7 +545,19 @@ export async function processQuery(
 
     void (async () => {
       try {
-        const pending = getPendingMessages();
+        let pending = getPendingMessages();
+
+        // nanoclaw-fork: /stop with nothing being answered is a no-op. Aborting the idle
+        // query would respawn the SDK subprocess for nothing (the host already told the user).
+        if (!answering) {
+          const idleStops = pending.filter((m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && isStopCommand(m));
+          if (idleStops.length > 0) {
+            const stopIds = idleStops.map((m) => m.id);
+            markProcessing(stopIds);
+            markCompleted(stopIds);
+            pending = pending.filter((m) => !stopIds.includes(m.id));
+          }
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -475,6 +571,7 @@ export async function processQuery(
         // long as the turn takes.
         if (pending.some((m) => isRunnerCommand(m, providerName))) {
           log('Pending slash command — aborting active stream so outer loop can process');
+          if (pending.some((m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && isStopCommand(m))) stopAborted = true;
           endedForCommand = true;
           query.abort();
           return;
@@ -532,6 +629,7 @@ export async function processQuery(
         query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
+          turnId: keptIds[0],
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
@@ -571,10 +669,27 @@ export async function processQuery(
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
 
+  if (answering) armTurnTimer(); // nanoclaw-fork
+
   try {
+    let lastDeltaBeatAt = 0;
     for await (const event of query.events) {
+      // nanoclaw-fork: live preview feed. Token-rate events stay out of the
+      // log and (mostly) the heartbeat file.
+      if (event.type === 'delta' || event.type === 'delta_reset') {
+        if (event.type === 'delta') turnTelemetry.onDelta(event.text);
+        else turnTelemetry.onDeltaReset();
+        const t = Date.now();
+        if (t - lastDeltaBeatAt >= 1000) {
+          lastDeltaBeatAt = t;
+          touchHeartbeat();
+        }
+        continue;
+      }
       handleEvent(event, routing);
       touchHeartbeat();
+      // nanoclaw-fork: «Модель сейчас перегружена, пробую снова…» as a progress step.
+      if (event.type === 'error' && event.retryable && event.classification === 'overload') turnTelemetry.apiRetry();
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -638,11 +753,12 @@ export async function processQuery(
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            const notice = event.error ?? 'The agent run failed. Check the logs for details.';
-            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
-            // Keep the reason in the runner log, since the skipped notice may
-            // be the only place it would have been recorded.
-            else log(`Error result — notice not sent on this route: ${notice}`);
+            // nanoclaw-fork: the user sees fixed Russian copy per failure class,
+            // never raw SDK/proxy text; the reason stays in the runner log.
+            const failureClass = event.failureClass ?? classifyFailure(event.error);
+            log(`Error result (${failureClass}): ${contentForLog(event.error ?? '(no detail)', 300)}`);
+            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, failureClass, currentTurnId);
+            else log(`Error result — notice not sent on this route (${failureClass})`);
           }
           // An unwrapped final text only warrants the wrap-nudge when NOTHING
           // was delivered this turn — hasUnwrapped already folds in the
@@ -689,16 +805,34 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        // nanoclaw-fork: close the telemetry turn before the next one opens.
+        turnTelemetry.endTurn(event.isError === true ? 'failed' : 'finished');
+        clearTurnTimer();
+        clearPendingSuggestions(); // unused suggest_replies never leak into the next turn
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
       }
+    }
+    // nanoclaw-fork: the stream ended with a turn still open. An abort
+    // (/stop, another runner command, loop shutdown) is a cancel; anything
+    // else is a stream that closed under the turn.
+    if (turnTelemetry.activeTurnId) turnTelemetry.endTurn(endedForCommand || signal?.aborted ? 'cancelled' : 'failed');
+    // nanoclaw-fork: follow-ups already acknowledged behind a stopped turn would vanish silently.
+    if (stopAborted && !timedOut) await noticeDroppedFollowUps(queuedTurns.map((q) => q.routing));
+    // nanoclaw-fork: the turn hit its wall-clock limit — save what was written.
+    if (timedOut && timedOutRouting) {
+      const partial = turnTelemetry.takeStopped()?.partial ?? '';
+      clearPendingSuggestions();
+      if (sendsFailureNotice(timedOutRouting)) await deliverTimeout(timedOutRouting, partial, timedOutTurnId);
+      else log('Turn timed out — notice not sent on this route');
     }
   } catch (err) {
     // Freeze the queue before awaiting notices. Follow-ups have already been
     // acknowledged, so an abandoned queued turn cannot rely on redelivery.
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
+    turnTelemetry.endTurn(cancelled ? 'cancelled' : 'failed'); // nanoclaw-fork
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
@@ -728,12 +862,20 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, 'The agent run failed. Check the logs for details.');
+          await deliverErrorResult(target, classifyFailure(errMsg), target === routing ? currentTurnId : undefined);
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
           );
         }
+      }
+    } else if (timedOut && timedOutRouting && sendsFailureNotice(timedOutRouting)) {
+      // nanoclaw-fork: the abort itself surfaced as a stream error — still a timeout.
+      const partial = turnTelemetry.takeStopped()?.partial ?? '';
+      try {
+        await deliverTimeout(timedOutRouting, partial, timedOutTurnId);
+      } catch (noticeError) {
+        log(`Failed to deliver timeout notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`);
       }
     }
     // Continuation recovery receives the original error; diagnostics remain
@@ -742,6 +884,7 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    clearTurnTimer(); // nanoclaw-fork
   }
 
   return { continuation: queryContinuation };
@@ -765,7 +908,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Session: ${event.continuation}`);
       break;
     case 'result':
-      log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
+      log(`Result: ${event.text ? contentForLog(event.text, 200) : '(empty)'}`); // nanoclaw-fork: NANOCLAW_LOG_CONTENT
       break;
     case 'error':
       log(
@@ -773,7 +916,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       );
       break;
     case 'progress':
-      log(`Progress: ${event.message}`);
+      log(`Progress: ${contentForLog(event.message, 200)}`); // nanoclaw-fork: NANOCLAW_LOG_CONTENT
       break;
   }
 }
@@ -787,9 +930,13 @@ function sendsFailureNotice(routing: RoutingContext): boolean {
   return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
 }
 
-/** Send the dedicated provider error or a generic failure notice. */
-async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
-  log('Error result notice — delivering to channel');
+/**
+ * nanoclaw-fork: send a failure notice. `failureClass` lets the host attach the
+ * class's buttons; `nc.turnId` is the first inbound row of the failed turn, so
+ * a [Повторить] tap can re-run exactly that prompt once.
+ */
+async function deliverErrorResult(routing: RoutingContext, failureClass: FailureClass, turnId?: string): Promise<void> {
+  log(`Error result notice (${failureClass}) — delivering to channel`);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -797,7 +944,35 @@ async function deliverErrorResult(routing: RoutingContext, text: string): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text), [FAILURE_NOTICE_FIELD]: true }),
+    content: JSON.stringify({
+      text: FAILURE_COPY[failureClass],
+      [FAILURE_NOTICE_FIELD]: true,
+      failureClass,
+      ...(turnId ? { nc: { turnId } } : {}),
+    }),
+  });
+}
+
+/**
+ * nanoclaw-fork: the «Задача шла слишком долго» result. The partial answer is
+ * kept in the chat; the host attaches [Продолжить] / [Начать заново] by
+ * `failureClass: 'timeout'`.
+ */
+async function deliverTimeout(routing: RoutingContext, partial: string, turnId?: string): Promise<void> {
+  log('Turn timeout notice — delivering to channel');
+  await writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({
+      markdown: partial ? `${FAILURE_COPY.timeout} Вот что успел:\n\n${partial}` : FAILURE_COPY.timeout,
+      [FAILURE_NOTICE_FIELD]: true,
+      failureClass: 'timeout',
+      nc: { ...(turnId ? { turnId } : {}), timeout: true },
+    }),
   });
 }
 
@@ -1143,7 +1318,7 @@ export async function dispatchResultText(
   const scratchpad = stripInternalTags(scratchpadParts.join(''));
 
   if (scratchpad) {
-    log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
+    log(`[scratchpad] ${contentForLog(scratchpad, 500)}`); // nanoclaw-fork: NANOCLAW_LOG_CONTENT
   }
 
   // In a task run, plain final text is the NORMAL ending (it becomes the run
@@ -1237,6 +1412,30 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   });
 }
 
+/** nanoclaw-fork: tell the user their messages sent behind a stopped turn were not handled. */
+async function noticeDroppedFollowUps(routes: RoutingContext[]): Promise<void> {
+  const seen = new Set<string>();
+  for (const r of routes) {
+    if (!sendsFailureNotice(r)) continue;
+    const key = `${r.channelType}:${r.platformId}:${r.threadId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      await writeMessageOut({
+        id: generateId(),
+        in_reply_to: r.inReplyTo,
+        kind: 'chat',
+        platform_id: r.platformId,
+        channel_type: r.channelType,
+        thread_id: r.threadId,
+        content: JSON.stringify({ text: 'Остановил. Сообщения, которые ты прислал следом, я не успел обработать — пришли их ещё раз.' }),
+      });
+    } catch (err) {
+      log(`Failed to deliver dropped-follow-up notice: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 /** Publish `routing` as the reply stamp the MCP tools read (null route clears it). */
 function publishReplyRoute(routing: RoutingContext): void {
   setCurrentReplyRoute(
@@ -1246,6 +1445,8 @@ function publishReplyRoute(routing: RoutingContext): void {
           channelType: routing.channelType,
           platformId: routing.platformId,
           threadId: routing.threadId,
+          taskRun: routing.taskRun,
+          seriesId: routing.seriesId ?? null,
         }
       : null,
   );

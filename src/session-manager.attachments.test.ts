@@ -176,3 +176,19 @@ describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibli
     expect(fs.readdirSync(canaryDir)).toHaveLength(0);
   });
 });
+
+describe('extractAttachmentFiles — name collision', () => {
+  it('a pre-existing file does not drop the attachment or leave its base64 in the row: it gets a suffixed name', async () => {
+    const inbox = path.join(sessionDir(AG, SESS), 'inbox', 'dup');
+    fs.mkdirSync(inbox, { recursive: true });
+    fs.writeFileSync(path.join(inbox, 'a.txt'), 'old');
+    await writeSessionMessage(AG, SESS, attachmentMessage('dup', ['a.txt']));
+    expect(fs.readFileSync(path.join(inbox, 'a.txt'), 'utf8')).toBe('old'); // never overwritten
+    expect(fs.readFileSync(path.join(inbox, 'a-2.txt'), 'utf8')).toBe('bytes-a.txt');
+    const { withMailboxSession } = await import('./session-manager.js');
+    const rows = await withMailboxSession(AG, SESS, (mb) => mb.getInboundHistory(10));
+    const content = JSON.stringify(rows);
+    expect(content).toContain('inbox/dup/a-2.txt');
+    expect(content).not.toContain(Buffer.from('bytes-a.txt').toString('base64'));
+  });
+});

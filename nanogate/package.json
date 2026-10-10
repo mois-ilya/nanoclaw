@@ -1,0 +1,18 @@
+{
+  "name": "nanogate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Anthropic key holder, per-tenant budget/policy gate and SSRF-safe egress proxy for NanoClaw",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run --root .. nanogate"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3"
+  }
+}

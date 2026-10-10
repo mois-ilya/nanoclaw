@@ -9,6 +9,9 @@
  * sanctioned upgrade paths (setup / update / migrate) call `set` on
  * success; running it by hand is also the documented way to clear the
  * startup tripwire — see docs/upgrade-recovery.md.
+ *
+ * nanoclaw-fork: with NANOCLAW_BUILD_ID set (Nix build) `set` records the
+ * buildId and the tripwire compares {version, buildId} instead of git.
  */
 import { getCodeVersion, markerPath, readUpgradeState, writeUpgradeState } from '../src/upgrade-state.js';
 

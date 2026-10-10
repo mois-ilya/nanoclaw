@@ -5,3 +5,5 @@
  * and the provider container-config barrel. Nothing outside this directory is
  * rewritten to install a gateway.
  */
+// nanoclaw-fork: nanogate (per-session token + relay) gateway provider.
+import './nanogate/index.js';

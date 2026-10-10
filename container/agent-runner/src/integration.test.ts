@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
+import { FAILURE_COPY } from './failure-class.js';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
@@ -471,7 +472,9 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    const notice = JSON.parse(out[0].content);
+    expect(notice.failureClass).toBe('overload');
+    expect(notice.text).toBe(FAILURE_COPY.overload);
     expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
@@ -500,7 +503,7 @@ describe('poll loop — stale session recovery', () => {
     // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe('Что-то сломалось у меня внутри. Я уже попробовал ещё раз — не вышло.');
     expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)
