@@ -242,6 +242,21 @@ describe('private message pipeline', () => {
     expect(c.text).toBe('альбом');
   });
 
+  it('album members stay unfinished in the journal until the album is routed (a restart replays them)', async () => {
+    api.files.set('a', { path: 'p/a.jpg', data: Buffer.from('A') });
+    setPrivateGate(async () => ({ action: 'route' as const }));
+    const u1 = upd({
+      message: msg({ media_group_id: 'g9', photo: [{ file_id: 'a', file_unique_id: 'a', width: 1, height: 1 }] }),
+    });
+    await store.saveUpdate(u1.update_id, '{}', 0);
+    const p = ing.dispatch(u1.update_id, u1);
+    await tick(1000); // inside the debounce window
+    expect((await store.loadPending()).map((x) => x.update_id)).toContain(u1.update_id);
+    await tick(1000);
+    await p;
+    expect((await store.loadPending()).map((x) => x.update_id)).not.toContain(u1.update_id);
+  });
+
   it('group chats: bot leaves; guest messages are not group messages', async () => {
     await feed(upd({ message: { ...msg({ text: 'x' }), chat: { id: -9, type: 'supergroup' } } as never }));
     expect(api.of('leaveChat')).toHaveLength(1);

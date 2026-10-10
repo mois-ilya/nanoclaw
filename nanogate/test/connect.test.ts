@@ -170,6 +170,17 @@ describe('plain HTTP via the proxy', () => {
 });
 
 describe('connector routing', () => {
+  it('reports whether the SOCKS address accepts a TCP connection, from nanogate own network', async () => {
+    await setup();
+    const srv = net.createServer((c) => c.destroy());
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as net.AddressInfo).port;
+    expect((await g.admin('POST', '/connectors/probe', { socksAddr: `127.0.0.1:${port}` })).json).toEqual({ up: true });
+    await new Promise<void>((r) => srv.close(() => r()));
+    expect((await g.admin('POST', '/connectors/probe', { socksAddr: `127.0.0.1:${port}` })).json).toEqual({ up: false });
+    expect((await g.admin('POST', '/connectors/probe', { socksAddr: 'bad addr' })).status).toBe(400);
+  });
+
   const putConnector = (tenant: string, o: Record<string, unknown> = {}) =>
     g.admin('PUT', `/connectors/${tenant}`, { socksAddr: socks.addr, status: 'up', routes: { cidrs: ['100.70.163.88/32', '10.201.0.0/20'], exitNode: true }, ...o });
 

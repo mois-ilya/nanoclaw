@@ -30,6 +30,14 @@ import { getMessagePolicy } from './db/agent-message-policies.js';
  */
 export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
 
+// nanoclaw-fork: a product veto, like the self-mod one: a friend's agent may not even ask the owner to approve a
+// new agent group (it would be an orphan with no tenant).
+export type AgentsCreateVeto = (agentGroupId: string) => Promise<string | null> | string | null;
+let agentsCreateVeto: AgentsCreateVeto | null = null;
+export function setAgentsCreateVeto(fn: AgentsCreateVeto | null): void {
+  agentsCreateVeto = fn;
+}
+
 export const agentsCreate = defineGuardedAction({
   action: 'agents.create',
   grantActionName: 'create_agent',
@@ -43,6 +51,8 @@ export const agentsCreate = defineGuardedAction({
   },
   decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('create_agent is a container-originated action.');
+    const vetoed = agentsCreateVeto ? await agentsCreateVeto(input.actor.agentGroupId) : null;
+    if (vetoed) return DENY(vetoed);
     const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
     if (cliScope === 'global') {
       // Trusted owner agent group — an approval tap on every sub-agent spawn

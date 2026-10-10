@@ -22,7 +22,9 @@ import {
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
+  deleteMessagingGroupAgent,
   getMessagingGroupAgentByPair,
+  getMessagingGroupAgents,
   getMessagingGroupByPlatform,
 } from '../db/messaging-groups.js';
 import { initGroupFilesystem } from '../group-init.js';
@@ -202,6 +204,13 @@ export async function ensureDmWiring(
       priority: 0,
       created_at: now,
     });
+  }
+  // A DM belongs to exactly one agent group. Wiring left by an earlier install of this database (the upstream
+  // chat install, a deleted life) would fan every message out to a group with no tenant and fail the spawn.
+  for (const stale of await getMessagingGroupAgents(mg.id)) {
+    if (stale.agent_group_id === agentGroup.id) continue;
+    log.warn('nc: dropping stale DM wiring', { tgId, agentGroupId: stale.agent_group_id });
+    await deleteMessagingGroupAgent(stale.id);
   }
   return mg;
 }

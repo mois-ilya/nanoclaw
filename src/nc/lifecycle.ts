@@ -24,6 +24,7 @@ import {
   listJobs,
   patchJob,
   getTenantByTg,
+  kvDelete,
   transitionTenant,
   updateTenant,
   upsertJob,
@@ -52,7 +53,26 @@ async function friend(tgId: number): Promise<Tenant> {
   return t;
 }
 
-export async function pauseFriend(tgId: number, actor: string): Promise<void> {
+/** Pause / resume / delete of one tenant never interleave: a slow gateway call must not be overtaken by the opposite action. */
+const locks = new Map<number, Promise<unknown>>();
+function withTenantLock<T>(tgId: number, fn: () => Promise<T>): Promise<T> {
+  const run = (locks.get(tgId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => undefined);
+  locks.set(tgId, tail);
+  void tail.then(() => {
+    if (locks.get(tgId) === tail) locks.delete(tgId);
+  });
+  return run;
+}
+
+export const pauseFriend = (tgId: number, actor: string): Promise<void> =>
+  withTenantLock(tgId, () => pauseFriendNow(tgId, actor));
+export const resumeFriend = (tgId: number, actor: string): Promise<void> =>
+  withTenantLock(tgId, () => resumeFriendNow(tgId, actor));
+export const deleteFriend = (tgId: number, actor: string): Promise<void> =>
+  withTenantLock(tgId, () => deleteFriendNow(tgId, actor));
+
+async function pauseFriendNow(tgId: number, actor: string): Promise<void> {
   const t = await friend(tgId);
   if (!(await transitionTenant(tgId, ['ready'], 'paused'))) {
     throw new LifecycleError('conflict', `cannot pause from state ${t.state}`);
@@ -85,13 +105,19 @@ async function suspend(t: Tenant, revoke = false): Promise<void> {
   invalidateBudget(gateIdOf(t));
 }
 
-export async function resumeFriend(tgId: number, actor: string): Promise<void> {
+async function resumeFriendNow(tgId: number, actor: string): Promise<void> {
   const t = await friend(tgId);
   if (!(await transitionTenant(tgId, ['paused'], 'ready'))) {
     throw new LifecycleError('conflict', `cannot resume from state ${t.state}`);
   }
   const fresh = (await getTenantByTg(tgId))!;
-  await pushTenant(fresh, 'active'); // upsert re-activates a revoked tenant
+  try {
+    await pushTenant(fresh, 'active'); // upsert re-activates a revoked tenant
+  } catch (err) {
+    // Central state must not say «ready» while the gateway is still paused: put it back so the owner can retry.
+    await transitionTenant(tgId, ['ready'], 'paused').catch(() => false);
+    throw err;
+  }
   await nanogateAdmin.resumeTenant(gateIdOf(t)).catch(() => undefined);
   if (t.agent_group_id) await resumeAllTasks(t.agent_group_id, t.tg_id).catch(() => 0);
   invalidateBudget(gateIdOf(t));
@@ -138,7 +164,7 @@ function moveToTrash(src: string, label: string): string | null {
   return dest;
 }
 
-export async function deleteFriend(tgId: number, actor: string): Promise<void> {
+async function deleteFriendNow(tgId: number, actor: string): Promise<void> {
   const t = await friend(tgId);
   if (t.state === 'deleted') throw new LifecycleError('conflict', 'already deleted');
   await suspend(t, true);
@@ -185,12 +211,25 @@ export async function deleteFriend(tgId: number, actor: string): Promise<void> {
     const job = await upsertJob('purge', dir);
     await patchJob(job.id, { step: new Date(Date.now() + TRASH_RETENTION_MS).toISOString() });
   }
+  // A failed/stale provision job must not be resumed mid-way by the next approval (it would skip persona, config,
+  // membership and DM wiring that this delete just removed).
+  await step('jobs', async () => {
+    for (const j of await listJobs(['pending', 'running', 'failed'])) {
+      if (j.kind === 'provision' && j.tenant === String(tgId)) await patchJob(j.id, { status: 'done' });
+    }
+  });
+  // Grants do not outlive the life they were given for: re-approval starts on direct egress.
+  await step('grants', async () => {
+    await kvDelete(`egress-ok:${tgId}`);
+    await kvDelete(`sys-paused:${tgId}`);
+  });
   await deletePrefs(t.user_id);
   await clearRetained(tgId);
   // A deleted user may ask again after the cooldown (or sooner if the owner reopens): their next life gets a new nanogate tenant id.
   await updateTenant(tgId, {
     state: 'deleted',
     agent_group_id: null,
+    egress: 'direct',
     denied_until: new Date(Date.now() + TRASH_RETENTION_MS).toISOString(),
   });
   await step('surface', () => clearChatSurface(tgId));

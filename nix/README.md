@@ -169,7 +169,7 @@ rules of `--internal` networks).
 - The old `inputs.nanoclaw.nixosModules.{default,onecli}` / `services.onecli` are replaced by this module.
 - sops secrets: telegram token, Anthropic key, `nanogate_key` (32 random bytes, hex), optionally the
   tailscale auth key. Files are read by systemd (`LoadCredential`), so they may be root-owned `0400`.
-- The Mini App vhost needs `services.caddy.enable = true` (already on nuremberg).
+- The Mini App vhost needs `services.caddy.enable = true` and only takes effect with the stock Caddy config. A consumer that sets its own `services.caddy.configFile` (nixserver on nuremberg: layer4 SNI router on :443, internal listener :8443) must copy `config.services.caddy.virtualHosts.${miniapp.domain}.extraConfig` into its Caddyfile, otherwise the TLS handshake for the Mini App domain fails.
 
 ## Known gaps / verify on the server
 

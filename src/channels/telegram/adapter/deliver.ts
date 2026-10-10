@@ -412,8 +412,12 @@ export class Deliverer {
     }
 
     if (interim && turn) {
-      // The answer text goes first, files follow it when the turn ends.
-      for (const f of own) turns.queueFile(turn, { ...f, caption });
+      // The answer text goes first, its files right after it, before this row is acknowledged: a restart or a
+      // send failure then leaves the row retryable instead of losing an already-acked file.
+      for (let i = attempt.filesSent; i < own.length; i++) {
+        await this.retrying(() => this.sendFile(chatId, own[i], caption));
+        attempt.filesSent = i + 1;
+      }
       let out: LastOut | undefined;
       const id = captured ? attempt.progress.ids[captured.count - 1] : undefined;
       if (captured && id && id > 0) out = { messageId: id, message: captured.last, markup };

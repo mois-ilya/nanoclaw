@@ -70,6 +70,24 @@ describe('per-tenant runner env', () => {
   });
 });
 
+describe('DM wiring', () => {
+  it('drops wiring to other agent groups left on the same DM (reused database)', async () => {
+    const mk = (id: string) => ({
+      id,
+      name: id,
+      folder: id,
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+    await createAgentGroup(mk('ag-old'));
+    await createAgentGroup(mk('ag-new'));
+    const mg = await ensureDmWiring(FRIEND_A, 'Маша', mk('ag-old') as never);
+    await ensureDmWiring(FRIEND_A, 'Маша', mk('ag-new') as never);
+    const { getMessagingGroupAgents } = await import('../db/messaging-groups.js');
+    expect((await getMessagingGroupAgents(mg.id)).map((w) => w.agent_group_id)).toEqual(['ag-new']);
+  });
+});
+
 describe('DM destination name', () => {
   it('a Cyrillic display name still gives the agent the stable ASCII destination «dm»', async () => {
     const ag = {

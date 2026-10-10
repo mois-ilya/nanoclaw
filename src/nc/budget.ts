@@ -91,6 +91,8 @@ export function consumeBudgetNote(chatId: number): string | undefined {
 
 let capUntil = 0;
 const CAP_KEY = 'globalCapUntil';
+/** The cap (micros) in force when the latch was set: raising the cap releases it. */
+const CAP_AT_KEY = 'globalCapAt';
 
 /** Epoch ms until which the installation cap blocks everything; null when not capped. */
 export function globalCapUntil(): number | null {
@@ -104,6 +106,10 @@ export function resetGlobalCapForTests(): void {
 export async function loadGlobalCap(): Promise<void> {
   const v = Number(await kvGet(CAP_KEY));
   capUntil = Number.isFinite(v) ? v : 0;
+  if (capUntil && Number(await kvGet(CAP_AT_KEY)) !== nc.globalCapMicros()) {
+    capUntil = 0;
+    await kvDelete(CAP_KEY);
+  }
 }
 
 function nextUtcMonthStart(): number {
@@ -137,6 +143,7 @@ export async function handleBudgetEvent(e: { tenantId: string; type: string; pay
     if (e.type === 'global_cap') {
       capUntil = nextUtcMonthStart();
       await kvSet(CAP_KEY, String(capUntil));
+      await kvSet(CAP_AT_KEY, String(nc.globalCapMicros()));
     }
     if (owner) {
       const p = (e.payload ?? {}) as { usedMicros?: number; capMicros?: number };

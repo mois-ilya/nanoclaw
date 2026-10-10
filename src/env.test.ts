@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { envValue, readEnvFile } from './env.js';
+import { envValue, normalizeTokenFile, readEnvFile } from './env.js';
 
 /**
  * `envValue` is the single-key form of `readEnvFile` — same file, same parser,
@@ -49,5 +49,13 @@ describe('envValue', () => {
   it('keeps = inside the value', () => {
     write('TOKEN=abc=def==\n');
     expect(envValue('TOKEN', root)).toBe('abc=def==');
+  });
+});
+
+describe('normalizeTokenFile', () => {
+  it('accepts a raw token and the old KEY=value env line', () => {
+    expect(normalizeTokenFile('123:abc\n')).toBe('123:abc');
+    expect(normalizeTokenFile('TELEGRAM_BOT_TOKEN=123:abc\n')).toBe('123:abc');
+    expect(normalizeTokenFile('export TELEGRAM_BOT_TOKEN="123:abc"\n')).toBe('123:abc');
   });
 });

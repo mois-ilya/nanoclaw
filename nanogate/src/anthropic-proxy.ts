@@ -4,7 +4,7 @@ import https from 'node:https';
 import type { Ctx } from './context.js';
 import { reserveBudget, settle } from './budget.js';
 import { checkRequest, isRejection } from './policy.js';
-import { costMicros, mediaEstimate, reserveMicros, serverToolCapMicros } from './pricing.js';
+import { costMicros, mediaEstimate, reserveParts, serverToolCapMicros } from './pricing.js';
 import { SseUsageParser, normalizeUsage } from './sse-usage.js';
 import type { LiveEntry } from './live.js';
 import { type TokenKind, authenticate, revalidate } from './tokens.js';
@@ -221,7 +221,7 @@ export async function handleAnthropic(ctx: Ctx, req: http.IncomingMessage, res: 
     const outStr = JSON.stringify(checked.body);
     // Valid UTF-8 re-serialises to no more than it came in (plus the few fields policy injects); refuse anything else.
     if (Buffer.byteLength(outStr, 'utf8') > rawLen + OUT_SLACK_BYTES) return sendError(res, 413, 'request_too_large', 'request body too large');
-    const outBody = Buffer.from(outStr, 'utf8');
+    let outBody = Buffer.from(outStr, 'utf8');
     // Only the outgoing copy stays held until the upstream write finishes; the transient copies are gone after this.
     giveBack(held - outBody.length);
     const model = checked.model;
@@ -233,24 +233,43 @@ export async function handleAnthropic(ctx: Ctx, req: http.IncomingMessage, res: 
     // Budget reservation (messages only; count_tokens is free).
     let reserved = 0;
     if (!isCount) {
-      reserved = reserveMicros(
-        ctx.config.prices, model, checked.maxTokens!, rawLen,
+      const parts = reserveParts(
+        ctx.config.prices, model, rawLen,
         serverToolCapMicros(ctx.config.prices, checked.body.tools, model, lim.serverToolResultInputTokens, lim.serverToolDefaultMaxUses, lim.serverToolMaxUses),
         mediaEstimate(checked.body),
       );
+      const maxTokens = checked.maxTokens!;
+      // Extended thinking needs max_tokens above its budget; never clamp into that.
+      const thinking = checked.body.thinking as { type?: unknown; budget_tokens?: unknown } | undefined;
+      const thinkingBudget = thinking?.type === 'enabled' && typeof thinking.budget_tokens === 'number' ? thinking.budget_tokens : 0;
+      const minTokens = Math.min(maxTokens, Math.max(lim.minOutputTokens, thinkingBudget + lim.minOutputTokens));
       reservationId = randomUUID();
       const r = reserveBudget(ctx.db, {
         id: reservationId, tenantId: tenant.id, tokenHash: auth.tokenHash, requestId, model, turnId, sessionKey: auth.sessionKey,
-        reserve: reserved, limit: tenant.budgetLimitMicros, tz: tenant.periodTz, windowCap: policy.perTurnCapMicros, windowMs: lim.capWindowMinutes * 60_000,
+        reserve: Math.ceil(parts.base + parts.perToken * maxTokens),
+        clamp: { base: parts.base, perToken: parts.perToken, maxTokens, minTokens },
+        limit: tenant.budgetLimitMicros, tz: tenant.periodTz, windowCap: policy.perTurnCapMicros, windowMs: lim.capWindowMinutes * 60_000,
         globalCap: ctx.config.globalCapUsdMicros, now: startedAt,
       });
       if (!r.ok) {
         reservationId = null;
-        const message = r.reason === 'turn' ? 'turn_cap_exceeded' : r.reason === 'global' ? 'global_cap_exceeded' : r.reason === 'budget_busy' ? 'budget_insufficient_now' : 'budget_exhausted';
+        // busy / global_busy: transient (own requests in flight hold the room); budget / global: final for the period.
+        const transient = r.reason === 'budget_busy' || r.reason === 'global_busy';
+        const message = r.reason === 'turn' ? 'turn_cap_exceeded' : r.reason === 'global' ? 'global_cap_exceeded' : transient ? 'budget_insufficient_now' : 'budget_exhausted';
         ctx.log({ msg: 'budget_denied', request_id: requestId, tenant: tenant.id, reason: r.reason });
         // A spent budget does not come back by retrying: tell the SDK not to (it would otherwise loop for minutes).
-        const noRetry: Record<string, string> = r.reason === 'turn' ? {} : r.reason === 'budget_busy' ? { 'retry-after': String(Math.max(1, Math.ceil((r.resetAt - Date.now()) / 1000))) } : { 'x-should-retry': 'false', 'retry-after': String(Math.max(1, Math.ceil((r.resetAt - Date.now()) / 1000))) };
-        return sendError(res, 429, 'rate_limit_error', message, { nanogate: { tenantId: tenant.id, resetAt: new Date(r.resetAt).toISOString() } }, { 'x-nanogate-budget': r.reason === 'turn' ? 'turn_cap' : r.reason === 'budget_busy' ? 'busy' : 'exhausted', ...noRetry });
+        const retryAfter = String(Math.max(1, Math.ceil((r.resetAt - Date.now()) / 1000)));
+        const noRetry: Record<string, string> = r.reason === 'turn' ? {} : transient ? { 'retry-after': retryAfter } : { 'x-should-retry': 'false', 'retry-after': retryAfter };
+        return sendError(res, 429, 'rate_limit_error', message, { nanogate: { tenantId: tenant.id, resetAt: new Date(r.resetAt).toISOString() } }, { 'x-nanogate-budget': r.reason === 'turn' ? 'turn_cap' : transient ? 'busy' : 'exhausted', ...noRetry });
+      }
+      reserved = r.reserve;
+      if (r.maxTokens !== undefined && r.maxTokens < maxTokens) {
+        // Fit the answer into what is left of the budget instead of refusing it.
+        checked.body.max_tokens = r.maxTokens;
+        const clamped = Buffer.from(JSON.stringify(checked.body), 'utf8');
+        giveBack(outBody.length - clamped.length);
+        outBody = clamped;
+        ctx.log({ msg: 'max_tokens_clamped', request_id: requestId, tenant: tenant.id, from: maxTokens, to: r.maxTokens });
       }
       ctx.activeReservations.add(reservationId);
     }

@@ -13,6 +13,7 @@ import {
   consumeBudgetNote,
   globalCapUntil,
   handleBudgetEvent,
+  loadGlobalCap,
   resetGlobalCapForTests,
   inQuietHours,
   loadBudgetNotes,
@@ -126,6 +127,20 @@ describe('global cap', () => {
     const m = fake.sent.find((x) => x.chatId === OWNER)!;
     expect(m.md).toContain('$100 из $100');
     expect(m.buttons!.flat()[0].webApp).toBe('system');
+  });
+  it('the latch survives a restart at the same cap and is released when the cap is raised', async () => {
+    await handleBudgetEvent({ tenantId: 'global', type: 'global_cap' });
+    resetGlobalCapForTests();
+    await loadGlobalCap();
+    expect(globalCapUntil()).not.toBeNull();
+    process.env.NC_GLOBAL_CAP_USD = '500';
+    try {
+      resetGlobalCapForTests();
+      await loadGlobalCap();
+      expect(globalCapUntil()).toBeNull();
+    } finally {
+      delete process.env.NC_GLOBAL_CAP_USD;
+    }
   });
   it('global_80 is a soft, silent heads-up and does not set the flag', async () => {
     const cap = globalCapUntil();

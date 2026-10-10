@@ -22,25 +22,20 @@ export async function mintTaskToken(tgId: number, seriesId: string, list = false
   const db = getDb();
   const now = Date.now();
   const rows = await db.all<{ key: string; value: string }>("SELECT key, value FROM nc_kv WHERE key LIKE 'ttok:%'");
-  let mine = 0;
+  const mine: Array<{ key: string; exp: number }> = [];
   for (const r of rows) {
     try {
       const e = JSON.parse(r.value) as TaskTokenEntry;
       if (e.exp < now) await kvDelete(r.key);
-      else if (e.tgId === tgId) mine++;
+      else if (e.tgId === tgId) mine.push({ key: r.key, exp: e.exp });
     } catch {
       await kvDelete(r.key);
     }
   }
-  if (mine > MAX_PER_USER) {
-    // A runaway list view: drop this user's oldest tokens rather than grow without bound.
-    for (const r of rows) {
-      try {
-        if ((JSON.parse(r.value) as TaskTokenEntry).tgId === tgId) await kvDelete(r.key);
-      } catch {
-        /* already handled above */
-      }
-    }
+  if (mine.length >= MAX_PER_USER) {
+    // A runaway list view: drop only this user's oldest tokens (expiry is minted + a constant TTL, so it orders by age).
+    mine.sort((x, y) => x.exp - y.exp);
+    for (const old of mine.slice(0, mine.length - MAX_PER_USER + 1)) await kvDelete(old.key);
   }
   const tok = randomBytes(5).toString('hex');
   await kvSet(

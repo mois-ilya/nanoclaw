@@ -189,20 +189,16 @@ describe('replay of what was sent before approval', () => {
 });
 
 describe('a failure after the ready step', () => {
-  it('stays retryable: «Повторить» resumes from the failed step and the friend is welcomed', async () => {
+  it('a welcome that cannot be delivered (friend blocked the bot) does not fail the job: replay and card still run', async () => {
     const welcomeFail = vi.spyOn((await import('./port.js')).tg, 'sendProduct');
     welcomeFail.mockRejectedValueOnce(new Error('403 blocked')); // the welcome
     expect(await startProvisioning(FRIEND_A, 1, 'owner')).toBe(true);
     await settle();
-    expect((await getTenantByTg(FRIEND_A))?.state).toBe('ready'); // already past 'ready'
-    const failed = (await listJobs(['failed'])).find((j) => j.kind === 'provision');
-    expect(failed?.step).toBe('welcome');
     welcomeFail.mockRestore();
-    expect(await retryProvisioning(FRIEND_A)).toBe(true);
-    await settle();
-    expect((await listJobs(['failed'])).length).toBe(0);
-    expect(fake.sent.some((s) => s.chatId === FRIEND_A && s.md.includes('Привет'))).toBe(true);
-    expect(routeInbound).toHaveBeenCalledTimes(2);
+    expect((await getTenantByTg(FRIEND_A))?.state).toBe('ready');
+    expect((await listJobs(['failed', 'pending', 'running'])).filter((j) => j.kind === 'provision')).toHaveLength(0);
+    expect(routeInbound).toHaveBeenCalledTimes(2); // the retained messages were replayed once
+    expect(fake.sent.some((s) => s.chatId === OWNER && s.md.includes('Не удалось создать'))).toBe(false);
   });
   it('nothing to retry when no job failed', async () => {
     await startProvisioning(FRIEND_A, 1, 'o');

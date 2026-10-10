@@ -227,6 +227,8 @@ export class TurnManager {
     for (const t of [...this.active.values()]) {
       if (t.sessionId !== sessionId || t.closed) continue;
       this.close(t, 'failed');
+      // quiet: the host retries the same batch, which carries the same turnId — it must be able to start again.
+      if (opts?.quiet) this.forgetFinished(t.turnId);
       // quiet: the host retries the batch once or says «не смог обработать» itself (single owner of the copy).
       if (!opts?.quiet) this.notifyFailure(t);
     }
@@ -854,6 +856,12 @@ export class TurnManager {
         log.warn('deferred finish failed', { chatId: t.chatId, err }),
       );
     }
+  }
+
+  private forgetFinished(turnId: string): void {
+    if (!this.finishedSet.delete(turnId)) return;
+    const i = this.finished.indexOf(turnId);
+    if (i >= 0) this.finished.splice(i, 1);
   }
 
   private rememberFinished(turnId: string): void {

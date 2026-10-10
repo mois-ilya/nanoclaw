@@ -340,7 +340,13 @@ describe('tenant scoping of data routes', () => {
     expect(fs.readFileSync(file, 'utf8').trim()).toBe(tok);
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(await (await call(token, 'GET', '/api/connections')).text()).not.toContain(tok);
+    const st = (await (await call(token, 'GET', '/api/connections')).json()) as { haToken: { savedAt: string } | null };
+    expect(Date.parse(st.haToken!.savedAt)).toBeGreaterThan(0);
+    expect(
+      ((await (await call(ft, 'GET', '/api/connections')).json()) as Record<string, unknown>).haToken,
+    ).toBeUndefined();
     expect((await call(token, 'DELETE', '/api/owner/secrets/ha-token')).status).toBe(204);
+    expect(((await (await call(token, 'GET', '/api/connections')).json()) as { haToken: unknown }).haToken).toBeNull();
     expect(fs.existsSync(file)).toBe(false);
   });
 

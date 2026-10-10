@@ -704,7 +704,17 @@ const connections: Handler = async ({ tenant, isOwner }) => {
     // Per-friend Tailscale is a later phase: never claim «Подключаюсь…» without a process behind it.
     conn = { id: 'tailscale', status: 'not_connected', message: 'Скоро: подключение своей домашней сети.' };
   }
-  return ok({ connections: [conn], egress: await egressView(tenant, isOwner) });
+  // Write-only secret: only whether (and when) it was saved, never the value.
+  let haToken: { savedAt: string } | null = null;
+  if (isOwner) {
+    try {
+      const f = path.join(GROUPS_DIR, await folderOf(tenant), '.secrets', 'ha_token');
+      haToken = { savedAt: fs.lstatSync(f).mtime.toISOString() };
+    } catch {
+      haToken = null;
+    }
+  }
+  return ok({ connections: [conn], egress: await egressView(tenant, isOwner), ...(isOwner ? { haToken } : {}) });
 };
 
 const SERVER_MANAGED = 'Управляется сервером';

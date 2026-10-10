@@ -91,6 +91,7 @@ export function fakeNanogate(over: Partial<Record<keyof NanogateAdmin, unknown>>
     deleteSecret: vi.fn(async () => undefined),
     putConnector: vi.fn(async () => undefined),
     deleteConnector: vi.fn(async () => undefined),
+    probeConnector: vi.fn(async () => true),
     mintHostToken: vi.fn(async () => ({ token: 'ngh_testtoken', hashPrefix: 'abcdef012345' })),
     ...over,
   };

@@ -222,15 +222,21 @@ async function runStep(step: Step, tgId: number): Promise<void> {
     case 'welcome': {
       const key = `welcomed:${tgId}:${t.epoch}`;
       if (await kvGet(key)) return;
-      await tg.sendProduct(tgId, copy.welcome(t.name), {
-        buttons: [
-          [
-            { text: 'Что ты умеешь?', data: 'p:cap' },
-            { text: 'Открыть кабинет', webApp: '' },
+      // Best-effort: the space already exists and is ready. A friend who blocked the bot (403) or a transient
+      // Telegram error must not fail the job (it would alert the owner on every restart and skip the replay/card).
+      try {
+        await tg.sendProduct(tgId, copy.welcome(t.name), {
+          buttons: [
+            [
+              { text: 'Что ты умеешь?', data: 'p:cap' },
+              { text: 'Открыть кабинет', webApp: '' },
+            ],
           ],
-        ],
-      });
-      await kvSet(key, '1');
+        });
+        await kvSet(key, '1');
+      } catch (err) {
+        log.warn('nc: welcome not delivered; continuing', { tgId, err });
+      }
       return;
     }
     case 'replay':

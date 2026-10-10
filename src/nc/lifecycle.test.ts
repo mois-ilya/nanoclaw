@@ -86,6 +86,15 @@ describe('lifecycle', () => {
     expect(ng.putTenant).toHaveBeenCalledWith(`telegram:${FRIEND_A}`, expect.objectContaining({ status: 'active' }));
   });
 
+  it('a failed gateway activation on resume leaves the tenant paused so the resume can be retried', async () => {
+    await pauseFriend(FRIEND_A, 'o');
+    ng.putTenant.mockRejectedValueOnce(new Error('nanogate down'));
+    await expect(resumeFriend(FRIEND_A, 'o')).rejects.toThrow('nanogate down');
+    expect((await getTenantByTg(FRIEND_A))!.state).toBe('paused');
+    await resumeFriend(FRIEND_A, 'o');
+    expect((await getTenantByTg(FRIEND_A))!.state).toBe('ready');
+  });
+
   it('the owner tenant cannot be paused or deleted through lifecycle', async () => {
     await insertTenantIfAbsent({ tgId: OWNER, name: 'Илья', state: 'ready' });
     await expect(pauseFriend(OWNER, 'x')).rejects.toBeInstanceOf(LifecycleError);
@@ -128,6 +137,18 @@ describe('lifecycle', () => {
 });
 
 describe('re-admitting a deleted friend', () => {
+  it('delete closes a failed provision job and resets the egress grant', async () => {
+    const { upsertJob, patchJob, listJobs, kvSet, kvGet } = await import('./store.js');
+    const job = await upsertJob('provision', String(FRIEND_A));
+    await patchJob(job.id, { status: 'failed', step: 'nanogate' });
+    await updateTenant(FRIEND_A, { egress: 'residential' });
+    await kvSet(`egress-ok:${FRIEND_A}`, '1');
+    await deleteFriend(FRIEND_A, 'owner');
+    expect((await listJobs(['pending', 'running', 'failed'])).filter((j) => j.kind === 'provision')).toHaveLength(0);
+    expect((await upsertJob('provision', String(FRIEND_A))).step).toBe('start');
+    expect((await getTenantByTg(FRIEND_A))!.egress).toBe('direct');
+    expect(await kvGet(`egress-ok:${FRIEND_A}`)).toBeFalsy();
+  });
   it('a new life uses a new nanogate tenant id (revoke is terminal), the old id is never reused', async () => {
     const { pushTenant, nanogatePolicy } = await import('./tenants.js');
     const { gateIdOf } = await import('./store.js');

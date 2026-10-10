@@ -119,6 +119,8 @@ export interface NanogateAdmin {
     body: { socksAddr: string; status: 'up' | 'down'; routes: { cidrs: string[]; exitNode: boolean } },
   ): Promise<void>;
   deleteConnector(tenantId: string): Promise<void>;
+  /** TCP-connect probe of a connector SOCKS address from nanogate's own network (the host cannot resolve it). */
+  probeConnector(socksAddr: string): Promise<boolean>;
 }
 
 export function createNanogateAdmin(
@@ -238,6 +240,10 @@ export function createNanogateAdmin(
     },
     async deleteConnector(tenantId) {
       await call('DELETE', `/connectors/${seg(tenantId)}`);
+    },
+    async probeConnector(socksAddr) {
+      const r = await call<{ up?: boolean }>('POST', '/connectors/probe', { socksAddr });
+      return r.up === true;
     },
   };
 }

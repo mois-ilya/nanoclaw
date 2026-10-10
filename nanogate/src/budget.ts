@@ -58,7 +58,8 @@ export function budgetSnapshot(db: Db, tenantId: string, limit: number | null, t
   // Requests are refused on a worst-case reserve, so the settled total can stay below the limit: a recorded
   // denial at this (or a higher) limit also counts as exhausted. Raising the limit clears it.
   const denied = limit !== null && deniedAtLimit(db, tenantId, per.start, limit);
-  const status = limit === null ? 'ok' : usedMicros + reservedMicros >= limit || denied ? 'exhausted' : usedMicros * 100 >= limit * 80 ? 'warn' : 'ok';
+  // Open reservations are worst-case and transient: they never make the month "exhausted" on their own.
+  const status = limit === null ? 'ok' : usedMicros >= limit || denied ? 'exhausted' : usedMicros * 100 >= limit * 80 ? 'warn' : 'ok';
   return { limitMicros: limit, usedMicros, reservedMicros, periodStart: per.start, periodEnd: per.end, status };
 }
 
@@ -76,7 +77,13 @@ export interface ReserveInput {
   turnId: string | null;
   /** session_key of the token (null for host tokens) */
   sessionKey: string | null;
+  /** worst-case cost of the request as sent */
   reserve: number;
+  /**
+   * How the reserve scales with max_tokens (reserve = base + perToken * maxTokens). When the full reserve does not fit
+   * what is left, max_tokens is lowered to fit, down to minTokens, instead of refusing the request.
+   */
+  clamp?: { base: number; perToken: number; maxTokens: number; minTokens: number };
   limit: number | null;
   tz: string;
   /** cap on this token's spend (settled + open reservations) inside the rolling window; null = none */
@@ -86,54 +93,78 @@ export interface ReserveInput {
   now: number;
 }
 
-/** Retry hint for a transient refusal (own requests in flight, or a reservation larger than what is left). */
+/** Retry hint for a transient refusal (the tenant's or the installation's own requests are in flight). */
 const BUSY_RETRY_MS = 10_000;
 
 export type ReserveResult =
-  | { ok: true }
-  | { ok: false; reason: 'budget' | 'budget_busy' | 'turn' | 'global'; resetAt: number };
+  | { ok: true; reserve: number; maxTokens?: number }
+  | { ok: false; reason: 'budget' | 'budget_busy' | 'turn' | 'global' | 'global_busy'; resetAt: number };
 
-/** Atomic check + insert (BEGIN IMMEDIATE). */
+/**
+ * Atomic check + insert (BEGIN IMMEDIATE).
+ *
+ * The reserve is a worst-case bound (full max_tokens, dearest input rate), so settled spend stays well below what was
+ * reserved. To let a budget actually be used up, a request whose full reserve does not fit what is left is admitted
+ * with a lower max_tokens (see ReserveInput.clamp). Only when not even minTokens fit is it refused:
+ * - own requests still in flight → transient (budget_busy / global_busy, retry soon);
+ * - nothing in flight → the money is really gone: the hard stop (budget_100 / global_cap event, final for the period).
+ */
 export function reserveBudget(db: Db, i: ReserveInput): ReserveResult {
   const tx = db.transaction((): ReserveResult => {
     const per = periodBounds(i.tz, i.now);
+    const g = periodBounds('UTC', i.now);
+    let tenantOpen = 0;
+    let globalOpen = 0;
+    let tenantUsed = 0;
+    const room: Array<{ kind: 'budget' | 'global' | 'turn'; avail: number }> = [];
     if (i.limit !== null) {
-      const u = used(db, i.tenantId, per);
-      const open = openReserved(db, i.tenantId);
-      if (u + open + i.reserve > i.limit) {
-        // The hard stop (budget_100, "exhausted" until the period or limit changes) is recorded only when the
-        // tenant's own in-flight requests are not what pushed it over: a refusal caused by parallel requests is
-        // transient and must not end the month for a friend who still has money left. With nothing in flight,
-        // what is left cannot cover a single request, so that refusal is final.
-        const exhausted = open === 0;
-        if (!exhausted) return { ok: false, reason: 'budget_busy', resetAt: i.now + BUSY_RETRY_MS };
-        if (!db.prepare("SELECT 1 FROM events WHERE tenant_id=? AND type='budget_100' AND json_extract(payload_json,'$.periodStart')=? AND json_extract(payload_json,'$.limitMicros')=?").get(i.tenantId, per.start, i.limit)) {
-          insertEvent(db, i.tenantId, 'budget_100', { periodStart: per.start, periodEnd: per.end, usedMicros: u, limitMicros: i.limit, denied: true });
-        }
-        return { ok: false, reason: 'budget', resetAt: per.end };
-      }
+      tenantUsed = used(db, i.tenantId, per);
+      tenantOpen = openReserved(db, i.tenantId);
+      room.push({ kind: 'budget', avail: i.limit - tenantUsed - tenantOpen });
+    }
+    if (i.globalCap !== null) {
+      const gu = (db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS s FROM usage WHERE started_at>=? AND started_at<?').get(g.start, g.end) as { s: number }).s;
+      globalOpen = (db.prepare("SELECT COALESCE(SUM(reserved_micros),0) AS s FROM reservations WHERE status='open'").get() as { s: number }).s;
+      room.push({ kind: 'global', avail: i.globalCap - gu - globalOpen });
     }
     if (i.windowCap !== null) {
       // Server-side only: derived from the ledger, so the agent cannot reset it by changing or omitting a header.
       const spent =
         (db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS s FROM usage WHERE tenant_id=? AND session_key IS ? AND started_at>=?').get(i.tenantId, i.sessionKey, i.now - i.windowMs) as { s: number }).s +
         (db.prepare("SELECT COALESCE(SUM(reserved_micros),0) AS s FROM reservations WHERE tenant_id=? AND token_hash=? AND status='open'").get(i.tenantId, i.tokenHash) as { s: number }).s;
-      if (spent + i.reserve > i.windowCap) return { ok: false, reason: 'turn', resetAt: per.end };
+      room.push({ kind: 'turn', avail: i.windowCap - spent });
     }
-    if (i.globalCap !== null) {
-      const g = periodBounds('UTC', i.now);
-      const gu = (db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS s FROM usage WHERE started_at>=? AND started_at<?').get(g.start, g.end) as { s: number }).s;
-      const go = (db.prepare("SELECT COALESCE(SUM(reserved_micros),0) AS s FROM reservations WHERE status='open'").get() as { s: number }).s;
-      if (gu + go + i.reserve > i.globalCap) {
-        const seen = db.prepare("SELECT 1 FROM events WHERE type='global_cap' AND json_extract(payload_json,'$.periodStart')=?").get(g.start);
-        if (!seen) insertEvent(db, 'global', 'global_cap', { periodStart: g.start });
-        return { ok: false, reason: 'global', resetAt: g.end };
+    const avail = room.reduce((m, r) => Math.min(m, r.avail), Infinity);
+
+    let reserve = i.reserve;
+    let maxTokens = i.clamp?.maxTokens;
+    if (reserve > avail && i.clamp && i.clamp.perToken > 0) {
+      const fit = Math.floor((avail - i.clamp.base) / i.clamp.perToken);
+      if (fit >= i.clamp.minTokens) {
+        maxTokens = Math.min(i.clamp.maxTokens, fit);
+        reserve = Math.ceil(i.clamp.base + i.clamp.perToken * maxTokens);
       }
+    }
+    if (reserve > avail) {
+      // The tightest constraint decides the refusal (ties: budget, then global, then the window cap).
+      const binding = room.filter((r) => r.avail === avail)[0]!.kind;
+      if (binding === 'turn') return { ok: false, reason: 'turn', resetAt: per.end };
+      if (binding === 'budget') {
+        if (tenantOpen > 0) return { ok: false, reason: 'budget_busy', resetAt: i.now + BUSY_RETRY_MS };
+        if (!db.prepare("SELECT 1 FROM events WHERE tenant_id=? AND type='budget_100' AND json_extract(payload_json,'$.periodStart')=? AND json_extract(payload_json,'$.limitMicros')=?").get(i.tenantId, per.start, i.limit)) {
+          insertEvent(db, i.tenantId, 'budget_100', { periodStart: per.start, periodEnd: per.end, usedMicros: tenantUsed, limitMicros: i.limit, denied: true });
+        }
+        return { ok: false, reason: 'budget', resetAt: per.end };
+      }
+      if (globalOpen > 0) return { ok: false, reason: 'global_busy', resetAt: i.now + BUSY_RETRY_MS };
+      const seen = db.prepare("SELECT 1 FROM events WHERE type='global_cap' AND json_extract(payload_json,'$.periodStart')=?").get(g.start);
+      if (!seen) insertEvent(db, 'global', 'global_cap', { periodStart: g.start });
+      return { ok: false, reason: 'global', resetAt: g.end };
     }
     db.prepare(
       "INSERT INTO reservations(id, tenant_id, token_hash, request_id, model, turn_id, reserved_micros, status, created_at) VALUES (?,?,?,?,?,?,?,'open',?)",
-    ).run(i.id, i.tenantId, i.tokenHash, i.requestId, i.model, i.turnId, i.reserve, i.now);
-    return { ok: true };
+    ).run(i.id, i.tenantId, i.tokenHash, i.requestId, i.model, i.turnId, reserve, i.now);
+    return { ok: true, reserve, maxTokens };
   });
   return tx.immediate();
 }

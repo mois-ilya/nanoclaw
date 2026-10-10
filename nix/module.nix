@@ -271,7 +271,12 @@ let
     label="''${1:-nightly}"
     dest=${cfg.backup.dir}/$(date -u +%Y%m%dT%H%M%SZ)-$label
     install -d -m 0700 ${cfg.backup.dir}
+    # Make room first (a full disk would otherwise fail every retry), and never leave a partial snapshot behind.
+    # shellcheck disable=SC2012
+    ls -1d ${cfg.backup.dir}/*/ 2>/dev/null | sort -r | tail -n +${toString cfg.backup.keep} | xargs -r rm -rf
     mkdir -p "$dest"
+    ok=0
+    trap '[ "$ok" = 1 ] || rm -rf "$dest"' EXIT
 
     snap() { # SRC DST: online SQLite .backup, skipped when the source is absent
       [ -f "$1" ] || return 0
@@ -289,11 +294,8 @@ let
     if [ -d ${cfg.stateDir}/groups ]; then
       tar --zstd -C ${cfg.stateDir} -cf "$dest/groups.tar.zst" groups
     fi
+    ok=1
     echo "backup written: $dest"
-
-    # retention: newest N per label class is overkill; keep N newest overall
-    # shellcheck disable=SC2012
-    ls -1d ${cfg.backup.dir}/*/ 2>/dev/null | sort -r | tail -n +$((${toString cfg.backup.keep} + 1)) | xargs -r rm -rf
   '';
 
   # Snapshot before the first start of a new build, then stamp the marker the
@@ -746,6 +748,11 @@ in
           ReadWritePaths = [ cfg.stateDir ];
           Restart = "on-failure";
           RestartSec = 5;
+          # The pre-upgrade snapshot (tar of groups/, SQLite .backup of every DB) runs in ExecStartPre; the default
+          # 90 s would kill it on a large groups/ and loop. A failed snapshot still blocks the start on purpose.
+          TimeoutStartSec = "30min";
+          # Under slice memory pressure the kernel OOM killer must pick an agent or whisper, not the host.
+          OOMScoreAdjust = -500;
           TimeoutStopSec = 60;
           UMask = "0027";
         };

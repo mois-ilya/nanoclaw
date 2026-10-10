@@ -1,7 +1,7 @@
 /** Native Telegram channel: registration. Token via TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_TOKEN_FILE or .env. */
 import fs from 'fs';
 
-import { readEnvFile } from '../../env.js';
+import { normalizeTokenFile, readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import { TELEGRAM_DEFAULTS, createTelegramAdapter } from './adapter/index.js';
@@ -11,7 +11,7 @@ function readToken(): string | undefined {
   const file = process.env.TELEGRAM_BOT_TOKEN_FILE;
   if (file) {
     try {
-      const t = fs.readFileSync(file, 'utf-8').trim();
+      const t = normalizeTokenFile(fs.readFileSync(file, 'utf-8'));
       if (t) return t;
     } catch (err) {
       log.error('Cannot read TELEGRAM_BOT_TOKEN_FILE', { err });

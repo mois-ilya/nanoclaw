@@ -86,12 +86,12 @@ describe('gap 1/13: interim chat rows do not close the turn', () => {
     expect(api.of('sendRichMessageDraft')).toHaveLength(n);
   });
 
-  it('send_file mid-turn: text first, files after the turn ends; turn stays open', async () => {
+  it('send_file mid-turn: text first, the file right after it (before the row is acked); turn stays open', async () => {
     start();
     await send({ text: 'Вот таблица. Подробности ниже.\nВторая строка' }, [
       { filename: 'a.xlsx', data: Buffer.from('x') },
     ]);
-    expect(api.of('sendDocument')).toHaveLength(0);
+    expect(api.of('sendDocument')).toHaveLength(1);
     expect(rt.turns.hasActiveTurn(CHAT)).toBe(true);
     finish();
     await tick(3000);
@@ -179,6 +179,21 @@ describe('gap 2/23: dead turns end', () => {
     await tick(1000);
     expect(rt.turns.hasActiveTurn(CHAT)).toBe(false);
     expect(api.of('sendRichMessage').some((c) => J(c).includes('Что-то сломалось'))).toBe(false);
+  });
+
+  it('a retried turn (same turnId) after a quiet crash-close starts again', async () => {
+    start();
+    await tick(500);
+    rt.turns.failTurnsForSession('sess-1', { quiet: true });
+    await tick(100);
+    expect(rt.turns.hasActiveTurn(CHAT)).toBe(false);
+    start();
+    expect(rt.turns.hasActiveTurn(CHAT)).toBe(true);
+    // a plain finish is still remembered: stale telemetry cannot reopen it
+    finish();
+    await tick(100);
+    start();
+    expect(rt.turns.hasActiveTurn(CHAT)).toBe(false);
   });
 
   it('a stale 👀 after a restart is cleared from the turn id', async () => {

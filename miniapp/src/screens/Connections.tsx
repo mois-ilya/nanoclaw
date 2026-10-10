@@ -6,7 +6,7 @@ import { ago, dateShort } from '../format';
 import * as tg from '../tg';
 import { ActionBar, Btn, Chip, Hint, Loadable, Row, Screen, Section, Segmented, useAction } from '../ui';
 
-interface Data { connections: ConnectionX[]; egress: EgressView }
+interface Data { connections: ConnectionX[]; egress: EgressView; haToken?: { savedAt: string } | null }
 
 const STATUS: Record<ConnectionX['status'], [('ok' | 'warn' | 'bad' | undefined), string]> = {
   not_connected: [undefined, 'Не подключено'], connecting: ['warn', 'Подключаюсь…'], connected: ['ok', 'Подключено'], error: ['bad', 'Ошибка'], expired: ['bad', 'Ключ истёк'],
@@ -17,6 +17,7 @@ export function Connections() {
   const res = useApi<Data>('/api/connections');
   const act = useAction(toast);
   const [key, setKey] = useState('');
+  const [ha, setHa] = useState('');
   const ts = res.data?.connections.find((c) => c.id === 'tailscale');
   // The owner's connector is run by the server: the backend rejects key changes and revocation (409), so the SPA offers neither.
   const managed = ts?.managed ?? me.role === 'owner';
@@ -34,6 +35,18 @@ export function Connections() {
     if (!ok) return;
     const done = await act.run(() => api.put('/api/connections/tailscale/key', { key: key.trim() }), 'Ключ сохранён');
     if (done) { setKey(''); invalidate('/api/connections'); res.reload(); }
+  }
+  async function saveHa() {
+    const ok = await tg.confirm({ title: 'Сохранить токен?', message: 'Токен Home Assistant сохранится для твоего ассистента. Потом его нельзя будет посмотреть — только заменить или отозвать.', okText: 'Сохранить' });
+    if (!ok) return;
+    const done = await act.run(() => api.put('/api/owner/secrets/ha-token', { token: ha.trim() }), 'Токен сохранён');
+    if (done) { setHa(''); invalidate('/api/connections'); res.reload(); }
+  }
+  async function revokeHa() {
+    const ok = await tg.confirm({ title: 'Отозвать токен?', message: 'Ассистент перестанет управлять Home Assistant. Токен будет удалён.', okText: 'Отозвать', destructive: true });
+    if (!ok) return;
+    const done = await act.run(() => api.del('/api/owner/secrets/ha-token'), 'Токен удалён');
+    if (done) { invalidate('/api/connections'); res.reload(); }
   }
   async function revoke() {
     const ok = await tg.confirm({ title: 'Отозвать доступ?', message: 'Ассистент перестанет подключаться к Tailscale. Ключ будет удалён.', okText: 'Отозвать', destructive: true });
@@ -53,7 +66,8 @@ export function Connections() {
     if (!ok) res.set(d); else invalidate('/api/connections');
   }
 
-  const dirty = key.trim().length > 0;
+  const haDirty = ha.trim().length > 0 && me.role === 'owner';
+  const dirty = key.trim().length > 0 || haDirty;
   return (
     <Screen title="Подключения" sub="Ключи и доступ" bar={dirty}>
       <Loadable res={res} rows={3}>
@@ -96,6 +110,17 @@ export function Connections() {
               )}
               </>)}
 
+              {isOwner && (
+                <Section header="Home Assistant" footer="Долгоживущий токен доступа: профиль Home Assistant → Безопасность. Он только записывается: после сохранения его нигде не видно.">
+                  <Row icon={{ name: 'connections', color: 'teal' }} title="Умный дом" sub="Управление устройствами через ассистента" right={<Chip kind={d.haToken ? 'ok' : undefined}>{d.haToken ? 'Токен сохранён' : 'Нет токена'}</Chip>} />
+                  {d.haToken && <Row title="Токен" value={<span class="mono">●●●● … сохранён {dateShort(d.haToken.savedAt, me.tz)}</span>} />}
+                  <input class="field" style="border-top:0.5px solid var(--sep)" type="password" autocomplete="off" autocapitalize="off" spellcheck={false} placeholder={d.haToken ? 'Заменить токен' : 'Вставить токен'} value={ha} onInput={(e) => setHa((e.target as HTMLInputElement).value)} aria-label="Токен Home Assistant" />
+                  {d.haToken && (
+                    <div class="btns" style="padding:8px 16px"><Btn kind="danger" onClick={revokeHa} disabled={act.busy}>Отозвать токен</Btn></div>
+                  )}
+                </Section>
+              )}
+
               {showEgress && (
                 <Section header="Выход в интернет" footer={d.egress.residentialAvailable
                   ? 'Через дом: запросы ассистента в интернет идут через твой домашний узел, сайты видят домашний адрес. Напрямую: с сервера ассистента.'
@@ -111,7 +136,9 @@ export function Connections() {
         }}
       </Loadable>
       <ActionBar
-        main={{ text: 'Сохранить ключ', visible: dirty && me.role === 'owner' && !managed, progress: act.busy, onClick: saveKey }}
+        main={haDirty
+          ? { text: 'Сохранить токен', visible: true, progress: act.busy, onClick: saveHa }
+          : { text: 'Сохранить ключ', visible: dirty && me.role === 'owner' && !managed, progress: act.busy, onClick: saveKey }}
         secondary={{ text: 'Отозвать', visible: me.role === 'owner' && !managed && !!ts && ts.status !== 'not_connected' && !dirty, destructive: true, nativeOnly: true, onClick: revoke }}
       />
     </Screen>

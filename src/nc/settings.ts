@@ -1,6 +1,6 @@
 /** Shared settings writes (Mini App PATCH /api/settings and the agent's `ncl me set-timezone`). */
 import { updateContainerConfigScalars } from '../db/container-configs.js';
-import { nc } from './config.js';
+import { nc, ownerTgId, userIdOf } from './config.js';
 import { getPrefs, putPrefs, type Tenant } from './store.js';
 import { rearmRecurring } from './tasks.js';
 
@@ -20,7 +20,10 @@ export function validTz(tz: string): boolean {
  */
 export async function applyTimezone(t: Pick<Tenant, 'user_id' | 'agent_group_id'>, tz: string): Promise<boolean> {
   if (!validTz(tz)) return false;
-  const cur = await getPrefs(t.user_id, { tz: nc.defaultTz() });
+  // The owner has no prefs row until the first write; a write must not turn the implicit «deep» into «normal».
+  const owner = ownerTgId();
+  const isOwner = owner !== null && t.user_id === userIdOf(owner);
+  const cur = await getPrefs(t.user_id, { tz: nc.defaultTz(), preset: isOwner ? 'deep' : 'normal' });
   if (cur.tz !== tz) await putPrefs(t.user_id, { ...cur, tz });
   if (t.agent_group_id) {
     await updateContainerConfigScalars(t.agent_group_id, { timezone: tz });

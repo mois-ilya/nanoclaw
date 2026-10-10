@@ -264,24 +264,47 @@ describe('budgets', () => {
     expect((await g.admin('GET', '/budget/t1')).json.status).toBe('exhausted');
   });
 
-  it('a refusal on the worst-case reserve raises budget_100, reports exhausted, and tells the SDK not to retry', async () => {
+  it('a nearly spent budget clamps max_tokens to fit what is left instead of refusing', async () => {
     g = await makeGate();
-    // one request reserves ~15k+; settled spend stays far below the limit when the next one is refused
-    await g.tenant('t1', { budgetLimitMicros: 30_000 });
+    // m-1: 15 micros per output token; 2000 tokens (~30k) do not fit 25k, ~1600 do (>= minOutputTokens 1024)
+    await g.tenant('t1', { budgetLimitMicros: 25_000 });
     const tok = await g.session('t1');
-    expect((await g.messages(tok, 'sse', { max_tokens: 1000 })).status).toBe(200);
-    expect((await g.admin('GET', '/budget/t1')).json.status).not.toBe('exhausted');
-    const r = await g.messages(tok, 'sse', { max_tokens: 1000 });
-    expect(r.status).toBe(429);
-    expect(r.headers.get('x-should-retry')).toBe('false');
-    expect(Number(r.headers.get('retry-after'))).toBeGreaterThan(0);
+    const r = await g.messages(tok, 'sse', { max_tokens: 2000 });
+    expect(r.status).toBe(200);
+    const sent = g.up.seen[g.up.seen.length - 1]!.body.max_tokens as number;
+    expect(sent).toBeLessThan(2000);
+    expect(sent).toBeGreaterThanOrEqual(1024);
     const types = ((await g.admin('GET', '/events')).json.events as any[]).map((e) => e.type);
-    expect(types).toContain('budget_100');
+    expect(types).not.toContain('budget_100');
+    expect((await g.admin('GET', '/budget/t1')).json.status).not.toBe('exhausted');
+  });
+
+  it('when not even the minimum answer fits and nothing is in flight, the month is over: budget_100, exhausted, no retry', async () => {
+    g = await makeGate();
+    await g.tenant('t1', { budgetLimitMicros: 10_000 }); // 1024 tokens x 15 = 15.4k > 10k
+    const tok = await g.session('t1');
+    const r = await g.messages(tok, 'sse', { max_tokens: 2000 });
+    expect(r.status).toBe(429);
+    expect(JSON.parse(r.text).error.message).toBe('budget_exhausted');
+    expect(r.headers.get('x-should-retry')).toBe('false');
+    const types = ((await g.admin('GET', '/events')).json.events as any[]).map((e) => e.type);
     expect(types.filter((t) => t === 'budget_100')).toHaveLength(1);
     expect((await g.admin('GET', '/budget/t1')).json.status).toBe('exhausted');
     // raising the limit clears it
     await g.tenant('t1', { budgetLimitMicros: 10_000_000 });
     expect((await g.admin('GET', '/budget/t1')).json.status).not.toBe('exhausted');
+    expect((await g.messages(tok, 'sse', { max_tokens: 2000 })).status).toBe(200);
+  });
+
+  it('thinking requests are never clamped below budget_tokens + the minimum', async () => {
+    g = await makeGate();
+    // budget_tokens 1500 -> min 2524 tokens (~38k) do not fit 30k: refused, not sent with max_tokens <= budget_tokens
+    await g.tenant('t1', { budgetLimitMicros: 30_000 });
+    const tok = await g.session('t1');
+    const before = g.up.seen.length;
+    const r = await g.messages(tok, 'sse', { max_tokens: 4000, thinking: { type: 'enabled', budget_tokens: 1500 } });
+    expect(r.status).toBe(429);
+    expect(g.up.seen.length).toBe(before);
   });
 
   it('task sessions are recorded with purpose task, other sessions as agent', async () => {
@@ -307,12 +330,23 @@ describe('budgets', () => {
     await slow;
   });
 
-  it('global cap blocks all tenants and raises one global_cap event', async () => {
-    g = await makeGate({ globalCapUsdMicros: 10_000 });
+  it('global cap: a request is clamped to fit, and refused only when even the minimum does not fit', async () => {
+    g = await makeGate({ globalCapUsdMicros: 25_000 });
     await g.tenant('a');
     const tok = await g.session('a');
-    expect((await g.messages(tok, 'sse', { max_tokens: 1000 })).status).toBe(429);
-    expect((await g.messages(tok, 'sse', { max_tokens: 1000 })).status).toBe(429);
+    expect((await g.messages(tok, 'sse', { max_tokens: 2000 })).status).toBe(200);
+    expect(g.up.seen[g.up.seen.length - 1]!.body.max_tokens).toBeLessThan(2000);
+    const ev = (await g.admin('GET', '/events')).json.events as any[];
+    expect(ev.filter((e) => e.type === 'global_cap')).toHaveLength(0);
+  });
+
+  it('global cap reached by settled spend blocks all tenants and raises one global_cap event', async () => {
+    g = await makeGate({ globalCapUsdMicros: 50_000 });
+    await g.tenant('a');
+    const tok = await g.session('a');
+    for (let i = 0; i < 3; i++) expect((await g.messages(tok, 'sse')).status).toBe(200);
+    expect((await g.messages(tok, 'sse')).status).toBe(429);
+    expect((await g.messages(tok, 'sse')).status).toBe(429);
     const ev = (await g.admin('GET', '/events')).json.events as any[];
     expect(ev.filter((e) => e.type === 'global_cap')).toHaveLength(1);
   });

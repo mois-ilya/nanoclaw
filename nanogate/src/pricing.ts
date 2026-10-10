@@ -83,14 +83,26 @@ export function reserveMicros(
   serverToolCap: number,
   media: MediaEstimate = { bytes: 0, tokens: 0 },
 ): number {
+  const r = reserveParts(t, model, bodyBytes, serverToolCap, media);
+  return Math.ceil(r.base + r.perToken * maxTokens);
+}
+
+/** The reserve split into what does not depend on max_tokens (input, server tools) and the price per output token. */
+export function reserveParts(
+  t: PriceTable,
+  model: string,
+  bodyBytes: number,
+  serverToolCap: number,
+  media: MediaEstimate = { bytes: 0, tokens: 0 },
+): { base: number; perToken: number } {
   const p = priceFor(t, model);
-  if (!p) return 0;
+  if (!p) return { base: 0, perToken: 0 };
   // bytes/2: JSON, code and non-Latin text tokenise far denser than the usual ~4 bytes per token.
   // Base64 media is billed by pixels / pages, not by size: its bytes are replaced by a per-item ceiling.
   const estInput = Math.ceil(Math.max(0, bodyBytes - media.bytes) / 2) + media.tokens;
   // Input may be billed as a cache write, which costs more than plain input: reserve the dearest rate.
   const inRate = Math.max(p.input, p.cacheWrite5m, p.cacheWrite1h);
-  return Math.ceil(p.output * maxTokens + inRate * estInput + serverToolCap);
+  return { base: inRate * estInput + serverToolCap, perToken: p.output };
 }
 
 /** Tool families whose schema takes max_uses (checkRequest injects / clamps it). Every other server tool ignores a client max_uses here. */

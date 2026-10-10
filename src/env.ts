@@ -54,3 +54,13 @@ export function readEnvFile(keys: string[], projectRoot?: string): Record<string
 export function envValue(key: string, projectRoot?: string): string | undefined {
   return readEnvFile([key], projectRoot)[key];
 }
+
+/** Credential files from the old install are `TELEGRAM_BOT_TOKEN=...` (an env line): accept that as well as the raw token. */
+export function normalizeTokenFile(raw: string): string {
+  const line = raw.split('\n').find((l) => l.trim()) ?? '';
+  return line
+    .trim()
+    .replace(/^(?:export\s+)?TELEGRAM_BOT_TOKEN\s*=\s*/, '')
+    .replace(/^(["'])(.*)\1$/, '$2')
+    .trim();
+}

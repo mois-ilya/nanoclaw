@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import type { Ctx } from './context.js';
 import { budgetSnapshot, validTz } from './budget.js';
 import { type TenantRow, getConnector, getTenant } from './db.js';
@@ -18,7 +19,7 @@ interface Reply {
   status: number;
   body: unknown;
 }
-type Handler = (ctx: Ctx, m: RegExpMatchArray, q: URLSearchParams, body: Json) => Reply;
+type Handler = (ctx: Ctx, m: RegExpMatchArray, q: URLSearchParams, body: Json) => Reply | Promise<Reply>;
 
 const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const ok = (body: unknown = { ok: true }, status = 200): Reply => ({ status, body });
@@ -262,6 +263,21 @@ const routes: [string, RegExp, Handler][] = [
     if (status === 'down' || changed) ctx.live.killConnectorTunnels(m[1]!);
     return ok();
   }],
+  // TCP-connect probe of a connector's SOCKS address from nanogate's own network namespace: the host process is
+  // outside the connector network (the address is a container alias there), so only nanogate can see it.
+  ['POST', /^\/connectors\/probe$/, async (_ctx, _m, _q, b) => {
+    const socksAddr = needStr(b.socksAddr, 'socksAddr');
+    const mm = socksAddr.match(/^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})$/);
+    if (!mm) throw new HttpError(400, 'bad_socksAddr');
+    const up = await new Promise<boolean>((resolve) => {
+      const sock = net.connect({ host: mm[1]!.replace(/^\[|\]$/g, ''), port: Number(mm[2]) });
+      const done = (v: boolean): void => { sock.destroy(); resolve(v); };
+      sock.setTimeout(1500, () => done(false));
+      sock.once('connect', () => done(true));
+      sock.once('error', () => done(false));
+    });
+    return ok({ up });
+  }],
   ['DELETE', /^\/connectors\/([^/]+)$/, (ctx, m) => {
     ctx.db.prepare('DELETE FROM connectors WHERE tenant_id=?').run(m[1]);
     ctx.live.killConnectorTunnels(m[1]!);
@@ -275,6 +291,12 @@ export function createAdminServer(ctx: Ctx): http.Server {
       const body = JSON.stringify(r.body);
       res.writeHead(r.status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
       res.end(body);
+    };
+    const fail = (e: unknown): void => {
+      if (e instanceof HttpError) return send({ status: e.status, body: { error: e.code } });
+      if (e instanceof SyntaxError) return send({ status: 400, body: { error: 'invalid_json' } });
+      ctx.log({ msg: 'admin_error', error: (e as Error).message });
+      send({ status: 500, body: { error: 'internal' } });
     };
     const chunks: Buffer[] = [];
     let n = 0;
@@ -299,14 +321,13 @@ export function createAdminServer(ctx: Ctx): http.Server {
           if (!m) continue;
           pathMatched = true;
           if (method !== req.method) continue;
-          return send(h(ctx, m.map((s) => (s === undefined ? s : decodeURIComponent(s))) as unknown as RegExpMatchArray, url.searchParams, body));
+          const r = h(ctx, m.map((s) => (s === undefined ? s : decodeURIComponent(s))) as unknown as RegExpMatchArray, url.searchParams, body);
+          if (r instanceof Promise) { r.then(send, fail); return; }
+          return send(r);
         }
         throw new HttpError(pathMatched ? 405 : 404, pathMatched ? 'method_not_allowed' : 'not_found');
       } catch (e) {
-        if (e instanceof HttpError) return send({ status: e.status, body: { error: e.code } });
-        if (e instanceof SyntaxError) return send({ status: 400, body: { error: 'invalid_json' } });
-        ctx.log({ msg: 'admin_error', error: (e as Error).message });
-        send({ status: 500, body: { error: 'internal' } });
+        fail(e);
       }
     });
   });

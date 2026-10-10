@@ -4,7 +4,7 @@
  */
 import fs from 'node:fs';
 
-import { readEnvFile } from '../env.js';
+import { normalizeTokenFile, readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
 function setting(key: string): string {
@@ -26,7 +26,7 @@ export function readBotToken(): string {
     const hit = fileCache.get(file);
     if (hit) return hit;
     try {
-      const t = fs.readFileSync(file, 'utf8').trim();
+      const t = normalizeTokenFile(fs.readFileSync(file, 'utf8'));
       if (t) {
         fileCache.set(file, t);
         return t;

@@ -3,8 +3,6 @@
  * the environment (set by Nix); we only tell nanogate about it. Tailscale
  * LocalAPI is out of scope for the host.
  */
-import net from 'node:net';
-
 import { log } from '../log.js';
 import { nanogateAdmin } from '../gateway-providers/nanogate/index.js';
 import { nc, ownerTgId, userIdOf } from './config.js';
@@ -22,24 +20,6 @@ export function ownerHasExitNode(): boolean {
   return v === undefined ? true : v.trim() !== '';
 }
 
-/** Is something listening on the SOCKS address of the userspace tailscaled? (A TCP connect, nothing more.) */
-export function probeSocks(addr: string, timeoutMs = 1500): Promise<boolean> {
-  return new Promise((resolve) => {
-    const i = addr.lastIndexOf(':');
-    const host = i > 0 ? addr.slice(0, i) : '';
-    const port = Number(addr.slice(i + 1));
-    if (!host || !Number.isInteger(port) || port <= 0) return resolve(false);
-    const sock = net.connect({ host, port });
-    const done = (ok: boolean): void => {
-      sock.destroy();
-      resolve(ok);
-    };
-    sock.setTimeout(timeoutMs, () => done(false));
-    sock.once('connect', () => done(true));
-    sock.once('error', () => done(false));
-  });
-}
-
 export type ConnectorStatus = 'ok' | 'down' | 'not_configured';
 
 let lastProbe: { at: number; up: boolean } | null = null;
@@ -49,7 +29,8 @@ export async function ownerConnectorStatus(fresh = false): Promise<ConnectorStat
   const socksAddr = nc.ownerConnectorSocks();
   if (!socksAddr) return 'not_configured';
   if (!fresh && lastProbe && Date.now() - lastProbe.at < 30_000) return lastProbe.up ? 'ok' : 'down';
-  const up = await probeSocks(socksAddr);
+  // The address is a container alias on the connector network: probe it from nanogate, which sits on that network.
+  const up = await nanogateAdmin.probeConnector(socksAddr).catch(() => false);
   lastProbe = { at: Date.now(), up };
   return up ? 'ok' : 'down';
 }

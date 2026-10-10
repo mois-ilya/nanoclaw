@@ -1,6 +1,7 @@
 /** Registers the host-owned platform layer (L0) with the project-document composer. */
 import { setGroupResourceFilter } from '../cli/guard.js';
 import { setSelfModVeto } from '../modules/self-mod/guard.js';
+import { setAgentsCreateVeto } from '../modules/agent-to-agent/guard.js';
 import { setPlatformLayerProvider } from '../project-doc-compose.js';
 import { setSessionEnvProvider } from '../session-env.js';
 import type { AgentGroup } from '../types.js';
@@ -39,5 +40,8 @@ export function installPlatformLayer(): void {
   setGroupResourceFilter(friendCliResources);
   setSelfModVeto(async (groupId) =>
     (await friendCliResources(groupId)) ? 'This agent may not change its own tools or packages.' : null,
+  );
+  setAgentsCreateVeto(async (groupId) =>
+    (await friendCliResources(groupId)) ? 'This agent may not create other agents.' : null,
   );
 }

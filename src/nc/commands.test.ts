@@ -15,13 +15,19 @@ const { listTasks, pauseTask, resumeTask, deleteTask, runTaskNow } = vi.hoisted(
   runTaskNow: vi.fn(async () => 1),
 }));
 vi.mock('./tasks.js', () => ({ listTasks, pauseTask, resumeTask, deleteTask, runTaskNow }));
+const { claims } = vi.hoisted(() => ({ claims: { n: 0 } }));
+vi.mock('../session-manager.js', async (orig) => ({
+  ...(await orig<typeof import('../session-manager.js')>()),
+  withExistingMailboxSession: async (_g: string, _s: string, fn: (m: unknown) => unknown) =>
+    fn({ getProcessingClaims: () => Array.from({ length: claims.n }, () => ({})) }),
+}));
 vi.mock('./health.js', () => ({ healthReport: vi.fn(async () => 'HEALTH') }));
 
 import { closeDb } from '../db/index.js';
 import { commandHandler, handleTaskCallback, renderTaskList } from './commands.js';
 import { setNanogateAdminForTests } from '../gateway-providers/nanogate/index.js';
 import { invalidateBudget } from './budget.js';
-import { mintTaskToken } from './tasktokens.js';
+import { lookupTaskToken, mintTaskToken } from './tasktokens.js';
 import type { PrivateUpdateCtx } from './port.js';
 import { insertTenantIfAbsent, updateTenant } from './store.js';
 import { FRIEND_A, FRIEND_B, OWNER, fakeNanogate, groupUpdate, installFakeAdapter, setupDb } from './test-helpers.js';
@@ -143,6 +149,22 @@ describe('/tasks list', () => {
     setNanogateAdminForTests(null);
   });
 
+  it('the per-user token cap drops only the oldest tokens, recent buttons keep working', async () => {
+    vi.useFakeTimers();
+    try {
+      const toks: string[] = [];
+      for (let i = 0; i < 303; i++) {
+        vi.advanceTimersByTime(1000);
+        toks.push(await mintTaskToken(FRIEND_A, `s-${i}`));
+      }
+      expect(await lookupTaskToken(toks[302]!)).toBeDefined();
+      expect(await lookupTaskToken(toks[290]!)).toBeDefined();
+      expect(await lookupTaskToken(toks[0]!)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('/stop answers at once, without waking a container, when no turn is in flight', async () => {
     running.v = true; // a warm container is not a running turn
     fake = installFakeAdapter({ hasActiveTurn: () => false });
@@ -152,6 +174,15 @@ describe('/tasks list', () => {
     fake = installFakeAdapter({ hasActiveTurn: () => true });
     await commandHandler(c(FRIEND_A), '/stop', '');
     expect(injectChat).toHaveBeenCalledWith(expect.anything(), FRIEND_A, '/stop');
+  });
+
+  it('/stop still reaches a container with a claimed row when the adapter lost the turn (host restart)', async () => {
+    running.v = true;
+    claims.n = 1;
+    fake = installFakeAdapter({ hasActiveTurn: () => false });
+    await commandHandler(c(FRIEND_A), '/stop', '');
+    expect(injectChat).toHaveBeenCalledWith(expect.anything(), FRIEND_A, '/stop');
+    claims.n = 0;
   });
 });
 

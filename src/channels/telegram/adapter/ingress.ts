@@ -125,6 +125,9 @@ interface GroupBuf {
   items: Array<{ msg: Msg; ctx: PrivateUpdateCtx; patch?: Record<string, unknown> }>;
   gateChain: Promise<unknown>;
   timer?: ReturnType<typeof setTimeout>;
+  /** Settles when the combined message has been routed: members stay `processing` in the journal until then. */
+  routed: Promise<void>;
+  settle: { resolve: () => void; reject: (err: unknown) => void };
 }
 
 export class Ingress {
@@ -277,7 +280,12 @@ export class Ingress {
     const key = `${ctx.chatId}:${msg.media_group_id}`;
     let g = this.groups.get(key);
     if (!g) {
-      g = { chatId: ctx.chatId, items: [], gateChain: Promise.resolve() };
+      let settle!: GroupBuf['settle'];
+      const routed = new Promise<void>((resolve, reject) => {
+        settle = { resolve, reject };
+      });
+      routed.catch(() => undefined); // every member awaits it; this only keeps an all-dropped album from being unhandled
+      g = { chatId: ctx.chatId, items: [], gateChain: Promise.resolve(), routed, settle };
       this.groups.set(key, g);
     }
     const buf = g;
@@ -291,10 +299,13 @@ export class Ingress {
     if (buf.timer) clearTimeout(buf.timer);
     buf.timer = setTimeout(() => {
       this.groups.delete(key);
-      const p = this.routeMessages(buf.items).catch((err: unknown) => log.error('media group routing failed', { err }));
-      this.inflight.add(p);
-      void p.finally(() => this.inflight.delete(p));
+      this.routeMessages(buf.items).then(buf.settle.resolve, (err: unknown) => {
+        log.error('media group routing failed', { err });
+        buf.settle.reject(err);
+      });
     }, MEDIA_GROUP_DEBOUNCE_MS);
+    // The update is done only once the album has really been routed (a restart in between replays it).
+    await buf.routed;
   }
 
   // ---- build + route -----------------------------------------------------

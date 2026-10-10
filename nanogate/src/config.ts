@@ -42,6 +42,8 @@ export interface Config {
     serverToolMaxUses: number;
     /** input tokens reserved per allowed server-tool use (search/fetch results are billed as input) */
     serverToolResultInputTokens: number;
+    /** max_tokens is never clamped below this to fit a nearly spent budget (the request is refused instead) */
+    minOutputTokens: number;
   };
   /** Hosts (and their subdomains) the CONNECT proxy never reaches: the model API goes through /anthropic only. */
   modelHosts: string[];
@@ -111,6 +113,7 @@ export function validateConfig(raw: unknown): Config {
       serverToolDefaultMaxUses: int(al.serverToolDefaultMaxUses, 'anthropicLimits.serverToolDefaultMaxUses', 5),
       serverToolMaxUses: int(al.serverToolMaxUses, 'anthropicLimits.serverToolMaxUses', 10),
       serverToolResultInputTokens: int(al.serverToolResultInputTokens, 'anthropicLimits.serverToolResultInputTokens', 25_000),
+      minOutputTokens: int(al.minOutputTokens, 'anthropicLimits.minOutputTokens', 1024),
     },
     modelHosts: strArr(r.modelHosts, 'modelHosts', ['anthropic.com']).map((h) => h.toLowerCase()),
     defaultBetas: strArr(r.defaultBetas, 'defaultBetas', [
@@ -164,7 +167,9 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
 }
 
 export function readApiKey(file: string): string {
-  const k = fs.readFileSync(file, 'utf8').trim();
+  // The old install stored this secret as an env line (`ANTHROPIC_API_KEY=...`): accept it as well as the raw key.
+  const line = fs.readFileSync(file, 'utf8').split('\n').find((l) => l.trim()) ?? '';
+  const k = line.trim().replace(/^(?:export\s+)?ANTHROPIC_API_KEY\s*=\s*/, '').replace(/^(["'])(.*)\1$/, '$2').trim();
   if (!k) throw new Error('anthropic key file is empty');
   return k;
 }

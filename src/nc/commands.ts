@@ -15,7 +15,14 @@ import { resolveGroupTimezone } from '../container-config.js';
 import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling/create.js';
 import { lookupTaskToken, mintTaskToken } from './tasktokens.js';
 import { isContainerRunning } from '../container-runner.js';
+import { withExistingMailboxSession } from '../session-manager.js';
 import { escapeMd, fmtUsd } from './util.js';
+
+async function hasProcessingClaim(s: { id: string; agent_group_id: string }): Promise<boolean> {
+  return withExistingMailboxSession(s.agent_group_id, s.id, (m) => m.getProcessingClaims().length > 0)
+    .then((r) => r === true)
+    .catch(() => false);
+}
 
 // ---------- task list + buttons ----------
 
@@ -314,7 +321,9 @@ export async function commandHandler(ctx: PrivateUpdateCtx, command: string, _ar
         const s = await dmSession(t);
         // Nothing can be running without a container or an in-flight turn: answer at once, never cold-start one.
         const turn = activeTurn(ctx.user.id);
-        if (!s || !isContainerRunning(s.id) || turn === false) {
+        // The adapter may have lost the turn (host restart with an adopted container): a claimed inbound row still counts.
+        const claimed = !!s && turn === false && isContainerRunning(s.id) && (await hasProcessingClaim(s));
+        if (!s || !isContainerRunning(s.id) || (turn === false && !claimed)) {
           await tg.sendProduct(ctx.chatId, copy.nothingToStop(), { silent: true });
           return true;
         }

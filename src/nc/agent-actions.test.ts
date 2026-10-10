@@ -12,7 +12,8 @@ vi.mock('./tasks.js', async () => ({ ...(await vi.importActual<object>('./tasks.
 import { closeDb } from '../db/index.js';
 import { ensureContainerConfig, getContainerConfig } from '../db/container-configs.js';
 import { appendGuestDraft, setTimezoneForGroup } from './agent-actions.js';
-import { friendCliResources } from './platform.js';
+import { friendCliResources, installPlatformLayer } from './platform.js';
+import { agentsCreate } from '../modules/agent-to-agent/guard.js';
 import { getDraft } from './guest-store.js';
 import { getPrefs, insertTenantIfAbsent, updateTenant } from './store.js';
 import { FRIEND_A, OWNER, installFakeAdapter, setupDb } from './test-helpers.js';
@@ -74,5 +75,25 @@ describe('friend CLI scope', () => {
     expect([...(await friendCliResources('ag-f'))!].sort()).toEqual(['me', 'tasks']);
     expect(await friendCliResources('ag-o')).toBeNull();
     expect(await friendCliResources('ag-unknown')).toBeNull();
+  });
+});
+
+describe('create_agent veto', () => {
+  it('a friend agent cannot even ask the owner to create an agent group; the owner agent still can', async () => {
+    installPlatformLayer();
+    const input = (agentGroupId: string) =>
+      ({ actor: { kind: 'agent', agentGroupId }, payload: { name: 'x' } }) as never;
+    expect((await agentsCreate.decide(input('ag-f'))).effect).toBe('deny');
+    expect((await agentsCreate.decide(input('ag-o'))).effect).not.toBe('deny');
+  });
+});
+
+describe('applyTimezone keeps the owner on the deep preset', () => {
+  it('the first prefs write for the owner stores deep, not normal', async () => {
+    const { applyTimezone } = await import('./settings.js');
+    await applyTimezone({ user_id: `telegram:${OWNER}`, agent_group_id: 'ag-o' }, 'Asia/Tbilisi');
+    expect((await getPrefs(`telegram:${OWNER}`, { tz: 'UTC' })).preset).toBe('deep');
+    await applyTimezone({ user_id: `telegram:${FRIEND_A}`, agent_group_id: 'ag-f' }, 'Asia/Tbilisi');
+    expect((await getPrefs(`telegram:${FRIEND_A}`, { tz: 'UTC' })).preset).toBe('normal');
   });
 });

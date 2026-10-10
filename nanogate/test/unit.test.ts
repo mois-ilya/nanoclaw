@@ -6,7 +6,10 @@ import { costMicros, reserveMicros, serverToolCapMicros, validatePrices } from '
 import { normalizePolicy, tailnetAllowed } from '../src/policy.js';
 import { parseAuthority } from '../src/connect-proxy.js';
 import { hashToken, mintToken, encrypt, decrypt } from '../src/tokens.js';
-import { validateConfig } from '../src/config.js';
+import { validateConfig, readApiKey } from '../src/config.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { PRICES } from './harness.js';
 
 describe('cidr', () => {
@@ -140,5 +143,17 @@ describe('config validation', () => {
   });
   it('per-tenant body cap may not exceed the global cap', () => {
     expect(() => validateConfig({ ...base, anthropicLimits: { maxInflightBodyBytes: 100, maxInflightBodyBytesPerTenant: 200 } })).toThrow(/maxInflightBodyBytesPerTenant/);
+  });
+});
+
+describe('readApiKey', () => {
+  it('accepts a raw key and the old ANTHROPIC_API_KEY= env line', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-key-'));
+    const f = path.join(d, 'k');
+    fs.writeFileSync(f, 'sk-ant-raw\n');
+    expect(readApiKey(f)).toBe('sk-ant-raw');
+    fs.writeFileSync(f, 'ANTHROPIC_API_KEY=sk-ant-raw\n');
+    expect(readApiKey(f)).toBe('sk-ant-raw');
+    fs.rmSync(d, { recursive: true });
   });
 });
