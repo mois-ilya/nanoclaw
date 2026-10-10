@@ -115,9 +115,9 @@ Options (all under `services.nanoclaw`): `enable`, `package`, `agentImage`, `sta
 
 `nanogate.pricesFile` defaults to `nix/default-prices.json`, which covers `claude-haiku-5-5`,
 `claude-sonnet-5-5`, `claude-opus-5-5` and the server tools of the default policy (`web_search`,
-`web_fetch`). **Its numbers are placeholders (`version` starts with `UNVERIFIED`): verify every value
-against anthropic.com/pricing before the first real deploy** and pass your own file via
-`nanogate.pricesFile`. A model absent from the table costs 0 in the budget, so any model set through
+`web_fetch`), with prices from platform.claude.com/docs/en/about-claude/pricing as of 2026-10-10
+(`version: anthropic-2026-10-10`; Haiku 5.5 uses the `longContext` tier above 100k prompt tokens). When Anthropic
+changes prices, update the file or pass your own via `nanogate.pricesFile`. A model absent from the table costs 0 in the budget, so any model set through
 `models.*` must be in the table. `module-eval` checks that the default file lists the models and tools above.
 
 ### Mini App short name

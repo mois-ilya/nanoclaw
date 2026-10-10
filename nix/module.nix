@@ -459,13 +459,13 @@ in
       pricesFile = mkOption {
         type = types.path;
         default = ./default-prices.json;
-        defaultText = "nix/default-prices.json (UNVERIFIED placeholder values)";
+        defaultText = "nix/default-prices.json (Anthropic list prices as of 2026-10-10)";
         description = ''
           JSON file with the price table (`{version, models, serverTools}`): USD per million tokens for models,
           USD per use for server tools. The default file covers claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5
-          and the server tools of the default policy (web_search, web_fetch), but its numbers are placeholders:
-          verify them against anthropic.com/pricing and override this option. Every model named in `models.*`
-          must be priced here, otherwise its requests cost 0 in the budget.
+          and the server tools of the default policy (web_search, web_fetch) at Anthropic list prices as of 2026-10-10;
+          update it (or override this option) when prices change. Every model named in `models.*` must be priced here,
+          otherwise its requests cost 0 in the budget.
         '';
       };
       globalCapUsd = mkOption { type = types.ints.unsigned; default = 100; description = "Monthly cap across all tenants, USD."; };

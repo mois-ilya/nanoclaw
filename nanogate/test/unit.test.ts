@@ -157,3 +157,30 @@ describe('readApiKey', () => {
     fs.rmSync(d, { recursive: true });
   });
 });
+
+describe('prompt-length price tiers', () => {
+  const t = validatePrices({
+    version: 'v',
+    models: {
+      h: { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01, longContext: { aboveTokens: 100_000, input: 0.5, output: 2.5, cacheWrite5m: 0.625, cacheWrite1h: 1, cacheRead: 0.05 } },
+    },
+    serverTools: {},
+  });
+  const u = (input: number, cacheRead = 0) => ({ input, output: 1000, cacheCreation5m: 0, cacheCreation1h: 0, cacheRead, serverTools: {}, serviceTier: null });
+
+  it('uses the base prices up to the threshold and the long-context prices above it (cache reads count)', () => {
+    expect(costMicros(t, 'h', u(100_000))).toBe(Math.ceil(100_000 * 0.1 + 1000 * 0.5));
+    expect(costMicros(t, 'h', u(60_000, 50_000))).toBe(Math.ceil(60_000 * 0.5 + 50_000 * 0.05 + 1000 * 2.5));
+  });
+
+  it('rejects a malformed tier', () => {
+    expect(() => validatePrices({ version: 'v', models: { h: { input: 1, output: 1, cacheWrite5m: 1, cacheWrite1h: 1, cacheRead: 1, longContext: { aboveTokens: 0 } } } })).toThrow(/aboveTokens/);
+  });
+
+  it('the shipped default price file is valid and covers the default models and tools', () => {
+    const file = JSON.parse(fs.readFileSync(new URL('../../nix/default-prices.json', import.meta.url), 'utf8'));
+    const p = validatePrices(file);
+    for (const m of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']) expect(p.models[m]).toBeDefined();
+    expect(p.serverTools.web_search).toBe(0.01);
+  });
+});

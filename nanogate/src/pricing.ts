@@ -1,11 +1,19 @@
 // Cost computation. This file contains NO prices: the table comes from config.
 
-export interface ModelPrice {
+export interface BasePrice {
   input: number;
   output: number;
   cacheWrite5m: number;
   cacheWrite1h: number;
   cacheRead: number;
+}
+
+export interface ModelPrice extends BasePrice {
+  /**
+   * Prompt-length tier (e.g. Claude Haiku 5.5): a request whose prompt (input + cache reads + cache writes) is over
+   * `aboveTokens` pays these prices for all of its tokens instead.
+   */
+  longContext?: { aboveTokens: number } & BasePrice;
 }
 
 export interface PriceTable {
@@ -26,7 +34,7 @@ export interface Usage {
   serviceTier: string | null;
 }
 
-const PRICE_KEYS: (keyof ModelPrice)[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
+const PRICE_KEYS: (keyof BasePrice)[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
 
 /** Throws on a malformed table. A zero price is valid (the table is filled at deploy time). */
 export function validatePrices(t: unknown): PriceTable {
@@ -37,6 +45,17 @@ export function validatePrices(t: unknown): PriceTable {
     for (const k of PRICE_KEYS) {
       if (typeof p?.[k] !== 'number' || !Number.isFinite(p[k]) || p[k] < 0) {
         throw new Error(`prices.models.${name}.${k} must be a non-negative number`);
+      }
+    }
+    if (p.longContext !== undefined) {
+      const lc = p.longContext;
+      if (!lc || typeof lc.aboveTokens !== 'number' || !Number.isInteger(lc.aboveTokens) || lc.aboveTokens <= 0) {
+        throw new Error(`prices.models.${name}.longContext.aboveTokens must be a positive integer`);
+      }
+      for (const k of PRICE_KEYS) {
+        if (typeof lc[k] !== 'number' || !Number.isFinite(lc[k]) || lc[k] < 0) {
+          throw new Error(`prices.models.${name}.longContext.${k} must be a non-negative number`);
+        }
       }
     }
   }
@@ -62,8 +81,10 @@ export function serverToolMicros(t: PriceTable, name: string): number {
 }
 
 export function costMicros(t: PriceTable, model: string, u: Usage): number {
-  const p = priceFor(t, model);
-  if (!p) return 0;
+  const base = priceFor(t, model);
+  if (!base) return 0;
+  const prompt = u.input + u.cacheRead + u.cacheCreation5m + u.cacheCreation1h;
+  const p: BasePrice = base.longContext && prompt > base.longContext.aboveTokens ? base.longContext : base;
   let c =
     u.input * p.input +
     u.output * p.output +
@@ -95,11 +116,15 @@ export function reserveParts(
   serverToolCap: number,
   media: MediaEstimate = { bytes: 0, tokens: 0 },
 ): { base: number; perToken: number } {
-  const p = priceFor(t, model);
-  if (!p) return { base: 0, perToken: 0 };
+  const base0 = priceFor(t, model);
+  if (!base0) return { base: 0, perToken: 0 };
+  // The bytes/2 estimate already overshoots real prompt length, so a prompt near the threshold reserves at the
+  // long-context prices (worst case); settlement prices the real usage.
+  const p0 = base0;
   // bytes/2: JSON, code and non-Latin text tokenise far denser than the usual ~4 bytes per token.
   // Base64 media is billed by pixels / pages, not by size: its bytes are replaced by a per-item ceiling.
   const estInput = Math.ceil(Math.max(0, bodyBytes - media.bytes) / 2) + media.tokens;
+  const p: BasePrice = p0.longContext && estInput > p0.longContext.aboveTokens ? p0.longContext : p0;
   // Input may be billed as a cache write, which costs more than plain input: reserve the dearest rate.
   const inRate = Math.max(p.input, p.cacheWrite5m, p.cacheWrite1h);
   return { base: inRate * estInput + serverToolCap, perToken: p.output };

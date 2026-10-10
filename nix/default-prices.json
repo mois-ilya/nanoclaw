@@ -1,10 +1,36 @@
 {
-  "version": "UNVERIFIED-placeholder-2026-10",
-  "_comment": "USD per million tokens. VERIFY EVERY NUMBER against https://www.anthropic.com/pricing before first deploy, then override nanogate.pricesFile. cacheWrite5m = 1.25x input, cacheWrite1h = 2x input, cacheRead = 0.1x input. serverTools are USD per single use.",
+  "version": "anthropic-2026-10-10",
+  "_comment": "USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-10, global endpoint, no inference_geo). Cache hits on Opus/Sonnet 5.5 are 0.05x input. Haiku 5.5 is tiered by prompt length (input + cache reads + cache writes > 100k tokens). serverTools are USD per single use: web search $10 / 1000 searches, web fetch free (tokens only).",
   "models": {
-    "claude-haiku-5-5": { "input": 1, "output": 5, "cacheWrite5m": 1.25, "cacheWrite1h": 2, "cacheRead": 0.1 },
-    "claude-sonnet-5-5": { "input": 3, "output": 15, "cacheWrite5m": 3.75, "cacheWrite1h": 6, "cacheRead": 0.3 },
-    "claude-opus-5-5": { "input": 5, "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5 }
+    "claude-haiku-5-5": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheWrite5m": 0.125,
+      "cacheWrite1h": 0.2,
+      "cacheRead": 0.01,
+      "longContext": {
+        "aboveTokens": 100000,
+        "input": 0.5,
+        "output": 2.5,
+        "cacheWrite5m": 0.625,
+        "cacheWrite1h": 1,
+        "cacheRead": 0.05
+      }
+    },
+    "claude-sonnet-5-5": {
+      "input": 2,
+      "output": 10,
+      "cacheWrite5m": 2.5,
+      "cacheWrite1h": 4,
+      "cacheRead": 0.1
+    },
+    "claude-opus-5-5": {
+      "input": 4,
+      "output": 20,
+      "cacheWrite5m": 5,
+      "cacheWrite1h": 8,
+      "cacheRead": 0.2
+    }
   },
   "serverTools": {
     "web_search": 0.01,

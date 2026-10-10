@@ -81,9 +81,7 @@ services.nanoclaw = {
   anthropicKeyFile   = config.sops.secrets."nanoclaw/anthropic_api_key".path;
   nanogate = {
     encryptionKeyFile = config.sops.secrets."nanoclaw/nanogate_key".path;
-    # По умолчанию берётся nix/default-prices.json: ЦЕНЫ ТАМ ЗАГЛУШКИ.
-    # Сверь с anthropic.com/pricing и подставь свой файл:
-    pricesFile = ./nanoclaw-prices.json;
+    # pricesFile по умолчанию: nix/default-prices.json (прайс Anthropic на 2026-10-10).
     globalCapUsd = 100;
     hostAddresses = [ "46.224.210.43" ];
     denyCidrs = [ "10.201.0.0/20" ];          # AWG
@@ -103,7 +101,7 @@ services.nanoclaw = {
 
 Что важно:
 
-- Цены. Файл по умолчанию покрывает `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, `web_search`, `web_fetch`, но значения непроверенные (`version` начинается с `UNVERIFIED`). Модель, которой нет в таблице, в бюджете стоит 0 и лимит друзей не сработает, поэтому каждая модель из `models.*` должна быть в таблице.
+- Цены. Файл по умолчанию (`nix/default-prices.json`) покрывает `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, `web_search`, `web_fetch` по прайсу Anthropic на 2026-10-10 (у Haiku 5.5 отдельный тариф для промптов длиннее 100k токенов). При смене цен обнови файл. Модель, которой нет в таблице, в бюджете стоит 0 и лимит друзей не сработает, поэтому каждая модель из `models.*` должна быть в таблице.
 - Caddy: `services.caddy.enable = true` (на nuremberg уже включён). Модуль добавляет vhost для `miniapp.domain` в `services.caddy.virtualHosts`, но он работает только со стандартным конфигом Caddy. Если потребитель задаёт свой `services.caddy.configFile` (как nixserver на nuremberg: layer4 SNI-роутер на :443 и внутренний listener :8443), vhost игнорируется и Mini App не откроется (TLS handshake падает). Тогда перенеси `config.services.caddy.virtualHosts.${miniapp.domain}.extraConfig` в свой Caddyfile (см. `modules/services/caddy.nix` в nixserver); DNS-запись `claw.mois.pro` должна указывать на сервер. Домен доступен всем, ограничение доступа делает проверка `initData` в Mini App.
 - Podman и AWG: Podman в nixserver остаётся с `firewall_driver` по умолчанию (nftables). Старая настройка `firewall_driver = "none"` из `containers.nix` несовместима: модуль на неё не соберётся (assertion), а изоляция `--internal` сетей без правил netavark не работает. Из-за смены правил файрвола после деплоя прогнать `/test-vpn`.
 - `alertCommand` необязателен; Telegram-алерты владельцу идут в любом случае.
@@ -150,7 +148,6 @@ services.nanoclaw = {
 
 ## 8. Известные ограничения на момент деплоя
 
-- Цены по умолчанию непроверенные (раздел 4).
 - `idle.*Minutes` и `resources.maxConcurrent` хост применяет (`src/lifecycle-policy.ts`, `src/spawn-admission.ts`). Лимит считает и тёплые простаивающие контейнеры: сообщение сверх лимита ждёт в очереди (владелец первым), а хост останавливает простаивающий контейнер (сначала друга, затем самый давно молчащий), чтобы освободить слот. Вложения `/workspace/inbox` чистятся по `inbox.retentionDays` (30) и `inbox.quotaMb` (500).
 - Телеграм-журнал входящих и повторы после падения контейнера описаны в отдельных пунктах аудита; читать `docs`/план перед выходом в продакшн.
 - Бэкапы (`/var/backups/nanoclaw`, ночные и перед обновлением) лежат на том же диске сервера и не шифруются. При потере диска или пересборке сервера (история nixos-infect) они пропадают вместе с данными. Отправка во внешнее хранилище (restic/rclone в R2 с шифрованием, как offsiteBackup у diwy-split) пока не сделана: настрой её на стороне nixserver до выхода в продакшн.
