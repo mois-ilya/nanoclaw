@@ -32,6 +32,16 @@ export class FakeApi {
     return this.calls.filter((c) => c.method === method);
   }
 
+  /** `sendRichMessageDraft` calls that are the «Думаю…» placeholder (a bare thinking block, sent on accept). */
+  placeholderDrafts(): Call[] {
+    return this.of('sendRichMessageDraft').filter((c) => !JSON.stringify(c.params).includes('Работаю'));
+  }
+
+  /** `sendRichMessageDraft` calls made by a running turn («Работаю · …» drafts). */
+  turnDrafts(): Call[] {
+    return this.of('sendRichMessageDraft').filter((c) => JSON.stringify(c.params).includes('Работаю'));
+  }
+
   getMe() {
     return this.rec('getMe', {}, { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' });
   }

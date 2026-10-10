@@ -152,20 +152,20 @@ describe('interim message vs the draft', () => {
     start();
     rt.turns.onPreview({ chatId: CHAT, turnId: T, sessionId: 'sess-1', seq: 1, text: 'Нашёл три варианта' });
     await tick(3000); // draft is live and shows the preview
-    expect(J(api.of('sendRichMessageDraft').pop()!)).toContain('Нашёл три варианта');
+    expect(J(api.turnDrafts().pop()!)).toContain('Нашёл три варианта');
     await send({ text: 'Нашёл три варианта' }); // the block closed: delivered as an interim message
     await tick(5000); // the draft comes back after 1.5 s
-    const last = api.of('sendRichMessageDraft').pop()!;
+    const last = api.turnDrafts().pop()!;
     expect(J(last)).not.toContain('Нашёл три варианта');
     expect(J(last)).toContain('Работаю');
     // A throttled preview of the same block that trails its chat row must not bring it back.
     rt.turns.onPreview({ chatId: CHAT, turnId: T, sessionId: 'sess-1', seq: 2, text: 'Нашёл три варианта' });
     await tick(5000);
-    expect(J(api.of('sendRichMessageDraft').pop()!)).not.toContain('Нашёл три варианта');
+    expect(J(api.turnDrafts().pop()!)).not.toContain('Нашёл три варианта');
     // New text does show.
     rt.turns.onPreview({ chatId: CHAT, turnId: T, sessionId: 'sess-1', seq: 3, text: 'Теперь второе' });
     await tick(3000);
-    expect(J(api.of('sendRichMessageDraft').pop()!)).toContain('Теперь второе');
+    expect(J(api.turnDrafts().pop()!)).toContain('Теперь второе');
     finish();
   });
 
@@ -173,10 +173,10 @@ describe('interim message vs the draft', () => {
     start();
     progress(1, 'api-retry', 'running', 'Модель сейчас перегружена, пробую снова…');
     await tick(3000);
-    expect(J(api.of('sendRichMessageDraft').pop()!)).toContain('перегружена');
+    expect(J(api.turnDrafts().pop()!)).toContain('перегружена');
     progress(2, 'api-retry', 'done', 'Модель сейчас перегружена, пробую снова…');
     await tick(3000);
-    expect(J(api.of('sendRichMessageDraft').pop()!)).not.toContain('перегружена');
+    expect(J(api.turnDrafts().pop()!)).not.toContain('перегружена');
   });
 });
 

@@ -82,7 +82,10 @@ describe('private message pipeline', () => {
         }),
       }),
     );
-    expect(api.of('sendMessageDraft')[0].params).toMatchObject({ chat_id: OWNER, text: '' });
+    expect(api.placeholderDrafts()[0].params).toMatchObject({
+      chat_id: OWNER,
+      rich_message: { blocks: [{ type: 'thinking' }] },
+    });
     expect(api.of('setMessageReaction')).toHaveLength(0);
     expect(api.of('sendChatAction')).toHaveLength(1);
     expect(inbound).toHaveLength(1);

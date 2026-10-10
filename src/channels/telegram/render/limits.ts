@@ -19,13 +19,14 @@ export function richLen(t: RichText): number {
   if (typeof t === 'string') return t.length;
   if (Array.isArray(t)) return t.reduce((n, x) => n + richLen(x), 0);
   if (t.type === 'mathematical_expression') return t.expression.length;
+  if (t.type === 'custom_emoji') return t.alternative_text.length;
   return richLen(t.text);
 }
 
 export function richDepth(t: RichText): number {
   if (typeof t === 'string') return 0;
   if (Array.isArray(t)) return t.reduce((n, x) => Math.max(n, richDepth(x)), 0);
-  if (t.type === 'mathematical_expression') return 1;
+  if (t.type === 'mathematical_expression' || t.type === 'custom_emoji') return 1;
   return 1 + richDepth(t.text);
 }
 
@@ -33,6 +34,7 @@ export function richToPlain(t: RichText): string {
   if (typeof t === 'string') return t;
   if (Array.isArray(t)) return t.map(richToPlain).join('');
   if (t.type === 'mathematical_expression') return t.expression;
+  if (t.type === 'custom_emoji') return t.alternative_text;
   return richToPlain(t.text);
 }
 

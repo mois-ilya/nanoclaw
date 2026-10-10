@@ -28,6 +28,9 @@ import type { Scheduler } from './scheduler.js';
 import type { TgStore, VoiceEcho } from './store.js';
 import type { InlineKeyboardMarkup } from '../botapi/index.js';
 
+/** https://t.me/addemoji/AIActions — the set Telegram recommends for InputRichBlockThinking. */
+const THINKING_EMOJI_ID = '5535034915403333642';
+
 export interface TurnConfig {
   /** NC_STOP_ENABLED=1: show the native Stop button on drafts. */
   stopEnabled: boolean;
@@ -206,6 +209,18 @@ export class TurnManager {
   private readonly finishedSet = new Set<string>();
   private readonly voices = new Map<string, VoiceEcho[]>();
   private fileSender?: FileSender;
+
+  /** Telegram's recommended AIActions custom emoji in the thinking block; off once Telegram refuses it. */
+  private thinkingEmoji = true;
+
+  private thinkingBlock(): InputRichBlock {
+    return {
+      type: 'thinking',
+      text: this.thinkingEmoji
+        ? [{ type: 'custom_emoji', custom_emoji_id: THINKING_EMOJI_ID, alternative_text: '🙂' }, ' Думаю…']
+        : 'Думаю…',
+    };
+  }
 
   constructor(private readonly d: TurnDeps) {
     this.cfg = { ...DEFAULT_TURN_CONFIG, ...d.cfg };
@@ -395,11 +410,12 @@ export class TurnManager {
       { prio: 'final', spaced: false, key: this.sk('placeholder', ph.threadId), maxRateRetries: 1 },
       async () => {
         if (this.placeholders.get(key) !== ph) return;
-        await this.d.api.sendMessageDraft({
+        // A rich «thinking» block, not the empty sendMessageDraft: iOS renders the empty draft as a blank bubble.
+        await this.d.api.sendRichMessageDraft({
           chat_id: ph.chatId,
           ...threadParam(ph.threadId),
           draft_id: ph.draftId,
-          text: '',
+          rich_message: { blocks: [this.thinkingBlock()] },
         });
         ph.confirmed = true;
       },
@@ -414,6 +430,13 @@ export class TurnManager {
       if (isForbidden(err)) {
         this.d.onForbidden?.(ph.chatId);
         drop();
+        return;
+      }
+      if (!ph.confirmed && this.thinkingEmoji && err instanceof TelegramError && err.kind === 'bad_request') {
+        // The custom emoji was refused: keep the animated block, drop the emoji (for the whole process).
+        log.warn('Thinking emoji rejected; using the plain thinking block', { desc: err.description });
+        this.thinkingEmoji = false;
+        this.sendPlaceholder(ph);
         return;
       }
       if (!ph.confirmed) {
@@ -873,7 +896,7 @@ export class TurnManager {
     if (content.length > 0) {
       blocks.push({ type: 'divider' }, ...content);
     } else if (t.steps.size === 0) {
-      blocks.push({ type: 'thinking', text: 'Думаю…' });
+      blocks.push(this.thinkingBlock());
     }
     return blocks;
   }

@@ -26,11 +26,14 @@ const send = async (content: Record<string, unknown>, files?: Array<{ filename: 
   return p;
 };
 /** The «Thinking…» placeholder is rejected: the message gets the 👀 instead. */
-const failPlaceholder = () =>
-  api.failNext(
-    'sendMessageDraft',
-    new TelegramError({ method: 'sendMessageDraft', kind: 'bad_request', code: 400, description: 'no drafts' }),
-  );
+const failPlaceholder = () => {
+  // the custom-emoji placeholder is retried once as a plain block: reject both
+  for (let i = 0; i < 2; i++)
+    api.failNext(
+      'sendRichMessageDraft',
+      new TelegramError({ method: 'sendRichMessageDraft', kind: 'bad_request', code: 400, description: 'no drafts' }),
+    );
+};
 const start = (turnId = T) => rt.turns.onTurn({ chatId: CHAT, turnId, sessionId: 'sess-1', state: 'started' });
 const finish = (state: 'finished' | 'cancelled' | 'failed' = 'finished', turnId = T) =>
   rt.turns.onTurn({ chatId: CHAT, turnId, sessionId: 'sess-1', state });
@@ -74,13 +77,13 @@ describe('gap 1/13: interim chat rows do not close the turn', () => {
     expect(reactionsAfterInterim).toHaveLength(0);
     expect(rt.turns.hasActiveTurn(CHAT)).toBe(true);
 
-    const draftsBefore = api.of('sendRichMessageDraft').length;
+    const draftsBefore = api.turnDrafts().length;
     step(1, 'Открываю страницу habr.com');
     step(2, 'Читаю a.md');
     step(3, 'Пишу b.md');
     await tick(20_000);
-    expect(api.of('sendRichMessageDraft').length).toBeGreaterThan(draftsBefore);
-    expect(J(api.of('sendRichMessageDraft').pop()!)).toContain('Пишу b.md');
+    expect(api.turnDrafts().length).toBeGreaterThan(draftsBefore);
+    expect(J(api.turnDrafts().pop()!)).toContain('Пишу b.md');
 
     await send({ text: 'Готово, вот результат' });
     expect(api.of('setMessageReaction').filter((c) => J(c).includes('"reaction":[]'))).toHaveLength(0);
@@ -90,9 +93,9 @@ describe('gap 1/13: interim chat rows do not close the turn', () => {
     expect(edit).toBeDefined();
     expect(J(edit!)).toContain('Готово, вот результат');
     expect(api.of('setMessageReaction').pop()!.params).toMatchObject({ message_id: 7, reaction: [] });
-    const n = api.of('sendRichMessageDraft').length;
+    const n = api.turnDrafts().length;
     await tick(40_000);
-    expect(api.of('sendRichMessageDraft')).toHaveLength(n);
+    expect(api.turnDrafts()).toHaveLength(n);
   });
 
   it('send_file mid-turn: text first, the file right after it (before the row is acked); turn stays open', async () => {
@@ -152,9 +155,9 @@ describe('gap 2/23: dead turns end', () => {
     await tick(0);
     start();
     await tick(6 * 60_000);
-    const n = api.of('sendRichMessageDraft').length;
+    const n = api.turnDrafts().length;
     await tick(60_000);
-    expect(api.of('sendRichMessageDraft')).toHaveLength(n);
+    expect(api.turnDrafts()).toHaveLength(n);
     expect(rt.turns.hasActiveTurn(CHAT)).toBe(false);
     const notice = api.of('sendRichMessage').pop()!;
     expect(J(notice)).toContain('Что-то сломалось');
@@ -322,10 +325,10 @@ describe('gap 5: stop', () => {
     start();
     await tick(3000);
     rt.turns.disableDrafts(CHAT);
-    const n = api.of('sendRichMessageDraft').length;
+    const n = api.turnDrafts().length;
     rt.turns.onPreview({ chatId: CHAT, turnId: T, sessionId: 's', seq: 3, text: 'ещё' });
     await tick(60_000);
-    expect(api.of('sendRichMessageDraft')).toHaveLength(n);
+    expect(api.turnDrafts()).toHaveLength(n);
   });
 });
 

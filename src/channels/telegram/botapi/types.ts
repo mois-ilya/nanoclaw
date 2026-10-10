@@ -380,6 +380,11 @@ export interface RichTextCode {
   type: 'code';
   text: RichText;
 }
+export interface RichTextCustomEmoji {
+  type: 'custom_emoji';
+  custom_emoji_id: string;
+  alternative_text: string;
+}
 export interface RichTextMathematicalExpression {
   type: 'mathematical_expression';
   /** LaTeX */
@@ -414,7 +419,8 @@ export type RichText =
   | RichTextCode
   | RichTextMathematicalExpression
   | RichTextUrl
-  | RichTextEmailAddress;
+  | RichTextEmailAddress
+  | RichTextCustomEmoji;
 
 // ---------------------------------------------------------------------------
 // Rich messages: blocks (inputrichblock*.md). Media/anchor/map/collage/

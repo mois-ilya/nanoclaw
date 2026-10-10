@@ -51,7 +51,7 @@ describe('runner → host telemetry actions', () => {
     await prev({ action: 'preview', turnId: 'T', seq: 1, text: 'Привет' }, session('mg-tg'));
     await vi.advanceTimersByTimeAsync(2600);
     // the draft goes out at turn start; progress / preview refresh it
-    const d = api.of('sendRichMessageDraft');
+    const d = api.turnDrafts();
     expect(d.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(d[d.length - 1].params)).toContain('Читаю a.md');
     expect(JSON.stringify(d[d.length - 1].params)).toContain('Привет');
@@ -61,6 +61,6 @@ describe('runner → host telemetry actions', () => {
     await turn({ action: 'turn', turnId: 'Y', state: 'weird' }, session('mg-tg'));
     await prog({ action: 'progress', turnId: 'T', seq: 'x' } as never, session('mg-tg'));
     await vi.advanceTimersByTimeAsync(2000);
-    expect(api.of('sendRichMessageDraft').every((c) => c.params.chat_id === 42)).toBe(true);
+    expect(api.turnDrafts().every((c) => c.params.chat_id === 42)).toBe(true);
   });
 });

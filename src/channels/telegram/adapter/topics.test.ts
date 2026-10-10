@@ -103,7 +103,7 @@ describe('topic = its own conversation', () => {
     });
     await tick(5000);
     await p;
-    const threaded = ['sendChatAction', 'sendMessageDraft', 'sendRichMessageDraft', 'sendRichMessage', 'sendDocument'];
+    const threaded = ['sendChatAction', 'sendRichMessageDraft', 'sendRichMessage', 'sendDocument'];
     for (const method of threaded) {
       expect(api.of(method).length, method).toBeGreaterThan(0);
       for (const c of api.of(method)) expect(c.params.message_thread_id, method).toBe(7);
@@ -221,27 +221,32 @@ describe('«Thinking…» placeholder', () => {
   it('is sent on inbound with empty text; the turn’s rich draft reuses the draft id', async () => {
     await feed(upd({ message: msg({ text: 'привет' }) }));
     const mid = (inbound[0].msg.content as { nc: { tgMessageId: number } }).nc.tgMessageId;
-    const ph = api.of('sendMessageDraft');
+    const ph = api.placeholderDrafts();
     expect(ph).toHaveLength(1);
-    expect(ph[0].params).toEqual({ chat_id: CHAT, draft_id: draftIdFor(`tg:${CHAT}:${mid}`), text: '' });
+    expect(ph[0].params).toMatchObject({
+      chat_id: CHAT,
+      draft_id: draftIdFor(`tg:${CHAT}:${mid}`),
+      rich_message: { blocks: [{ type: 'thinking' }] },
+    });
+    expect(api.of('sendMessageDraft')).toHaveLength(0);
     expect(api.of('setMessageReaction')).toHaveLength(0);
     start(`tg:${CHAT}:${mid}:ag`);
     await tick(0);
-    expect(api.of('sendRichMessageDraft')[0].params.draft_id).toBe(ph[0].params.draft_id);
+    expect(api.turnDrafts()[0].params.draft_id).toBe(ph[0].params.draft_id);
   });
 
   it('is re-sent before it expires (every 20 s) and given up after 2 minutes', async () => {
     rt.turns.noteInbound(CHAT, 7);
     await tick(0);
     await tick(20_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(2);
+    expect(api.placeholderDrafts()).toHaveLength(2);
     await tick(60_000);
-    expect(api.of('sendMessageDraft').length).toBeGreaterThanOrEqual(5);
+    expect(api.placeholderDrafts().length).toBeGreaterThanOrEqual(5);
     await tick(3 * 60_000);
-    const n = api.of('sendMessageDraft').length;
+    const n = api.placeholderDrafts().length;
     expect(n).toBeLessThanOrEqual(8);
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(n);
+    expect(api.placeholderDrafts()).toHaveLength(n);
   });
 
   it('stops refreshing once the turn starts', async () => {
@@ -249,7 +254,7 @@ describe('«Thinking…» placeholder', () => {
     await tick(0);
     start(`tg:${CHAT}:7`);
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(1);
+    expect(api.placeholderDrafts()).toHaveLength(1);
   });
 
   it('stops refreshing after the final / failure / stop', async () => {
@@ -258,25 +263,44 @@ describe('«Thinking…» placeholder', () => {
     const p = del.deliver(PLATFORM, null, { kind: 'chat', content: { text: 'быстро', nc: { final: true } } });
     await tick(3000);
     await p;
-    const n = api.of('sendMessageDraft').length;
+    const n = api.placeholderDrafts().length;
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(n);
+    expect(api.placeholderDrafts()).toHaveLength(n);
 
     rt.turns.noteInbound(CHAT, 9);
     await tick(0);
     rt.turns.disableDrafts(CHAT);
-    const m = api.of('sendMessageDraft').length;
+    const m = api.placeholderDrafts().length;
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(m);
+    expect(api.placeholderDrafts()).toHaveLength(m);
   });
 
-  it('falls back to 👀 when the placeholder is rejected', async () => {
-    api.failNext('sendMessageDraft', badRequest('sendMessageDraft'));
+  it('a rejected custom emoji is retried once as a plain block, and later placeholders skip the emoji', async () => {
+    api.failNext('sendRichMessageDraft', badRequest('sendRichMessageDraft'));
+    rt.turns.noteInbound(CHAT, 7);
+    await tick(0);
+    const sent = api.placeholderDrafts();
+    expect(sent).toHaveLength(2);
+    expect(JSON.stringify(sent[0].params)).toContain('custom_emoji');
+    expect(JSON.stringify(sent[1].params)).not.toContain('custom_emoji');
+    expect(sent[1].params.draft_id).toBe(sent[0].params.draft_id);
+    expect(api.of('setMessageReaction')).toHaveLength(0); // the plain block was accepted: no 👀
+    // a later conversation goes straight to the plain block
+    rt.turns.noteInbound(CHAT, 9, 8);
+    await tick(0);
+    const later = api.placeholderDrafts().filter((c) => c.params.message_thread_id === 8);
+    expect(later).toHaveLength(1);
+    expect(JSON.stringify(later[0].params)).not.toContain('custom_emoji');
+  });
+
+  it('falls back to 👀 when the placeholder is rejected (emoji and plain block alike)', async () => {
+    api.failNext('sendRichMessageDraft', badRequest('sendRichMessageDraft'));
+    api.failNext('sendRichMessageDraft', badRequest('sendRichMessageDraft'));
     rt.turns.noteInbound(CHAT, 7);
     await tick(0);
     expect(api.of('setMessageReaction')[0].params).toMatchObject({ message_id: 7, reaction: [{ emoji: '👀' }] });
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(1); // no retries of a rejected placeholder
+    expect(api.placeholderDrafts()).toHaveLength(2); // emoji + plain attempt, then no more retries
     // the turn clears the 👀 when it ends
     start(`tg:${CHAT}:7`);
     finish(`tg:${CHAT}:7`);
@@ -289,26 +313,29 @@ describe('«Thinking…» placeholder', () => {
     await tick(100);
     rt.turns.noteInbound(CHAT, 8, 7);
     await tick(0);
-    expect(api.of('sendMessageDraft')).toHaveLength(0);
+    expect(api.placeholderDrafts()).toHaveLength(0);
     expect(api.of('setMessageReaction')[0].params).toMatchObject({ message_id: 8, reaction: [{ emoji: '👀' }] });
     // ...while a message in another topic still gets its own placeholder
     rt.turns.noteInbound(CHAT, 9, 8);
     await tick(0);
-    expect(api.of('sendMessageDraft')[0].params).toMatchObject({ message_thread_id: 8, text: '' });
+    expect(api.placeholderDrafts()[0].params).toMatchObject({
+      message_thread_id: 8,
+      rich_message: { blocks: [{ type: 'thinking' }] },
+    });
   });
 
   it('a second message before the turn starts is acknowledged with 👀 (one placeholder per conversation)', async () => {
     rt.turns.noteInbound(CHAT, 7);
     rt.turns.noteInbound(CHAT, 8);
     await tick(0);
-    expect(api.of('sendMessageDraft')).toHaveLength(1);
+    expect(api.placeholderDrafts()).toHaveLength(1);
     expect(api.of('setMessageReaction')[0].params).toMatchObject({ message_id: 8 });
   });
 
   it('a blocked chat is not retried and gets no reaction', async () => {
     api.failNext(
-      'sendMessageDraft',
-      new TelegramError({ method: 'sendMessageDraft', kind: 'forbidden', code: 403, description: 'blocked' }),
+      'sendRichMessageDraft',
+      new TelegramError({ method: 'sendRichMessageDraft', kind: 'forbidden', code: 403, description: 'blocked' }),
     );
     rt.turns.noteInbound(CHAT, 7);
     await tick(0);
@@ -321,7 +348,7 @@ describe('«Thinking…» placeholder', () => {
     await tick(0);
     rt.turns.releaseInbound(CHAT, 7);
     await tick(60_000);
-    expect(api.of('sendMessageDraft')).toHaveLength(1);
+    expect(api.placeholderDrafts()).toHaveLength(1);
     expect(api.of('setMessageReaction')).toHaveLength(0);
   });
 });
@@ -334,7 +361,7 @@ describe('review fixes', () => {
 
   it('a slash command no product handler took gets no placeholder (👀 instead)', async () => {
     await feed(upd({ message: msg({ text: '/clear', entities: [{ type: 'bot_command', offset: 0, length: 6 }] }) }));
-    expect(api.of('sendMessageDraft')).toHaveLength(0);
+    expect(api.placeholderDrafts()).toHaveLength(0);
     expect(api.of('setMessageReaction')[0].params).toMatchObject({ reaction: [{ emoji: '👀' }] });
   });
 
@@ -355,12 +382,13 @@ describe('review fixes', () => {
   });
 
   it('a turn whose id is an echo id links to no message and does not collide with the original', async () => {
-    api.failNext('sendMessageDraft', badRequest('sendMessageDraft'));
+    api.failNext('sendRichMessageDraft', badRequest('sendRichMessageDraft'));
+    api.failNext('sendRichMessageDraft', badRequest('sendRichMessageDraft'));
     rt.turns.noteInbound(CHAT, 5, 7); // topic 7: 👀 fallback on message 5
     await tick(0);
     start(`tg:${CHAT}:5:echo:sess-b`, 8);
     await tick(100);
-    const draft = api.of('sendRichMessageDraft')[0].params;
+    const draft = api.turnDrafts()[0].params;
     expect(draft.draft_id).not.toBe(draftIdFor(`tg:${CHAT}:5`));
     finish(`tg:${CHAT}:5:echo:sess-b`, 8);
     await tick(2000);
