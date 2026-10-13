@@ -140,7 +140,14 @@ export type McpServerConfig =
       /** Claude: keep this server's tools in the prompt instead of deferring them behind tool search. */
       alwaysLoad?: boolean;
     }
-  | { type: 'http'; url: string; headers?: Record<string, string>; alwaysLoad?: boolean };
+  | {
+      type: 'http';
+      url: string;
+      headers?: Record<string, string>;
+      /** Per-server tool-call timeout in ms; set by the host for gateway connectors that hold a call for approval. */
+      timeout?: number;
+      alwaysLoad?: boolean;
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

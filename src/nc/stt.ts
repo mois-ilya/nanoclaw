@@ -1,13 +1,15 @@
 /** Voice transcription: Groq Whisper when a key is set, else (or on failure) a local whisper-server (`POST /inference`). */
 import { log } from '../log.js';
 import { nc } from './config.js';
-import { markGroqKeyInvalid, usableGroqKey } from './groq-key.js';
+import { markGroqKeyInvalid, usableGroqKeys } from './groq-key.js';
 import type { TranscribeResult } from './port.js';
-import { recordVoice } from './store.js';
+import { getTenantByTg, recordVoice } from './store.js';
 
 export const MAX_VOICE_SECONDS = 300;
 export const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_TIMEOUT_MS = 30_000;
+/** All Groq candidates (own, shared, server) together get this long before the local server takes over. */
+const GROQ_TOTAL_MS = 45_000;
 /** Groq free tier file limit; bigger audio goes straight to the local server. */
 export const GROQ_MAX_BYTES = 25 * 1024 * 1024;
 /** Whisper-server is serial; time spent waiting in our own queue never counts against the HTTP timeout. */
@@ -168,13 +170,14 @@ async function groqTranscribe(
   meta: { mime: string },
   key: string,
   fetchFn: typeof fetch,
+  timeoutMs = GROQ_TIMEOUT_MS,
 ): Promise<GroqBody | null> {
   const form = new FormData();
   form.append('file', new Blob([new Uint8Array(audio)], { type: meta.mime || 'audio/ogg' }), groqFilename(meta.mime));
   form.append('model', nc.groqSttModel());
   form.append('response_format', 'verbose_json');
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), GROQ_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetchFn(GROQ_URL, {
       method: 'POST',
@@ -204,17 +207,32 @@ export async function transcribe(
   if (meta.durationS > MAX_VOICE_SECONDS) return { error: 'too_long' };
   const knownS = meta.durationS > 0;
   const budgetS = knownS ? meta.durationS : estimateDurationS(audio.length);
-  const groq = audio.length <= GROQ_MAX_BYTES ? usableGroqKey() : null;
-  if (groq) {
+  // The speaker's own key first, then the shared one, then the server's: every distinct usable key is tried within one deadline.
+  let groqUserId: string | undefined;
+  if (audio.length <= GROQ_MAX_BYTES) {
+    groqUserId = await getTenantByTg(meta.userId)
+      .then((t) => t?.user_id)
+      .catch(() => undefined);
+  }
+  const candidates = audio.length <= GROQ_MAX_BYTES ? usableGroqKeys(groqUserId) : [];
+  if (candidates.length > 0) {
     const startedAt = Date.now();
-    let body = await groqTranscribe(audio, meta, groq.key, fetchFn);
-    // A parked Mini App key falls through to the server key before going local.
-    if (!body) {
-      const next = usableGroqKey();
-      if (next && next.key !== groq.key) body = await groqTranscribe(audio, meta, next.key, fetchFn);
+    let body: GroqBody | null = null;
+    let used = candidates[0];
+    for (const cand of candidates) {
+      const left = GROQ_TOTAL_MS - (Date.now() - startedAt);
+      if (left <= 0) break;
+      used = cand;
+      body = await groqTranscribe(audio, meta, cand.key, fetchFn, Math.min(GROQ_TIMEOUT_MS, left));
+      if (body) break;
     }
     if (body) {
-      log.info('nc: stt done', { provider: 'groq', audioS: meta.durationS, ms: Date.now() - startedAt });
+      log.info('nc: stt done', {
+        provider: 'groq',
+        source: used.source,
+        audioS: meta.durationS,
+        ms: Date.now() - startedAt,
+      });
       const reportedS = typeof body.duration === 'number' && body.duration > 0 ? Math.ceil(body.duration) : 0;
       const countedS = knownS ? meta.durationS : reportedS > 0 ? Math.min(MAX_VOICE_SECONDS, reportedS) : budgetS;
       await recordVoice(`telegram:${meta.userId}`, countedS).catch(() => undefined);

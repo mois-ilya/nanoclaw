@@ -24,6 +24,8 @@ vi.mock('./drivers/index.js', () => {
 
 import {
   adoptRunningSessions,
+  getContainerConfigStartedAtMs,
+  getContainerStartedAtMs,
   isContainerRunning,
   killContainer,
   stopOrphanedSessions,
@@ -143,6 +145,35 @@ describe('stopOrphanedSessions', () => {
   it('asks nothing of the runtime when this process supervises nothing', async () => {
     expect(await stopOrphanedSessions()).toBe(0);
     expect(listSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe('config start time (applying a changed container.json to running sessions)', () => {
+  it('an adopted runtime has no known start: it counts as older than any change mark', async () => {
+    await adopt();
+    expect(getContainerStartedAtMs('sess-1')).toBeGreaterThan(0); // the ceiling check keeps the adoption time
+    expect(getContainerConfigStartedAtMs('sess-1')).toBe(0);
+  });
+
+  it('a spawned runtime reports its own start; an unknown session reports nothing', async () => {
+    await ensureContainerConfig('ag-1');
+    const { handle } = fakeHandle('sess-1');
+    prepare.mockResolvedValue(handle);
+    const before = Date.now();
+    expect(await wakeContainer(session('sess-1'))).toBe(true);
+    expect(getContainerConfigStartedAtMs('sess-1')).toBeGreaterThanOrEqual(before);
+    expect(getContainerConfigStartedAtMs('nope')).toBeUndefined();
+  });
+
+  it('the config time is taken before a slow spawn, not after it', async () => {
+    await ensureContainerConfig('ag-1');
+    const { handle } = fakeHandle('sess-1');
+    prepare.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return handle;
+    });
+    expect(await wakeContainer(session('sess-1'))).toBe(true);
+    expect(getContainerStartedAtMs('sess-1')! - getContainerConfigStartedAtMs('sess-1')!).toBeGreaterThanOrEqual(25);
   });
 });
 

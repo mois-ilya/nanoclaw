@@ -136,6 +136,21 @@ describe('lifecycle', () => {
   });
 });
 
+describe('delete removes what the tenant owned beyond chat state', () => {
+  it('MCP connector rows (and their nanogate copies) and the own Groq key go with the tenant', async () => {
+    const { createConnector, listConnectors } = await import('./mcp-connectors.js');
+    const { userKeyPath, writeKeyFile } = await import('./groq-key.js');
+    const uid = `telegram:${FRIEND_A}`;
+    const row = await createConnector(uid, 'github');
+    writeKeyFile(userKeyPath(uid), `gsk_${'k'.repeat(30)}`);
+    expect(fs.existsSync(userKeyPath(uid))).toBe(true);
+    await deleteFriend(FRIEND_A, 'owner');
+    expect(ng.deleteMcpConnector).toHaveBeenCalledWith(row.id);
+    expect(await listConnectors(uid)).toEqual([]);
+    expect(fs.existsSync(userKeyPath(uid))).toBe(false);
+  });
+});
+
 describe('re-admitting a deleted friend', () => {
   it('delete closes a failed provision job and resets the egress grant', async () => {
     const { upsertJob, patchJob, listJobs, kvSet, kvGet } = await import('./store.js');

@@ -13,11 +13,18 @@ export interface Config {
   /** Per budget period (UTC month), all tenants together. null = no global cap. */
   globalCapUsdMicros: number | null;
   connectLimits: {
-    maxTunnelsPerTenant: number; maxTunnelsGlobal: number; maxTunnelSeconds: number; maxBytesPerTunnel: number; idleSeconds: number;
+    maxTunnelsPerTenant: number;
+    maxTunnelsGlobal: number;
+    maxTunnelSeconds: number;
+    maxBytesPerTunnel: number;
+    idleSeconds: number;
     /** concurrent DNS lookups: per tenant, and for the whole process. The default resolver is c-ares (no libuv pool threads). */
-    dnsPerTenant: number; dnsGlobal: number; dnsTimeoutMs: number;
+    dnsPerTenant: number;
+    dnsGlobal: number;
+    dnsTimeoutMs: number;
     /** lookups allowed to WAIT for a slot: per tenant (429 when full) and process-wide (503). Wait counts toward dnsTimeoutMs. */
-    dnsQueuePerTenant: number; dnsQueueGlobal: number;
+    dnsQueuePerTenant: number;
+    dnsQueueGlobal: number;
   };
   anthropicLimits: {
     /** whole request body must arrive within this */
@@ -45,6 +52,21 @@ export interface Config {
     /** max_tokens is never clamped below this to fit a nearly spent budget (the request is refused instead) */
     minOutputTokens: number;
   };
+  /** MCP connector proxy (/mcp/:id on listen.mcpPort). */
+  mcp: {
+    /** a dangerous tools/call waits this long for the owner's decision */
+    holdMs: number;
+    /** ABSOLUTE deadline for one upstream exchange: DNS, connect, headers and the whole body */
+    upstreamTimeoutMs: number;
+    maxPendingPerTenant: number;
+    maxPendingTotal: number;
+    maxBodyBytes: number;
+    /** copy of a tools/list or tools/call response kept for parsing, at most */
+    maxListBytes: number;
+    /** a client socket idle this long is destroyed; must outlast holdMs */
+    socketIdleMs: number;
+    callsRetentionDays: number;
+  };
   /** Hosts (and their subdomains) the CONNECT proxy never reaches: the model API goes through /anthropic only. */
   modelHosts: string[];
   /** anthropic-beta values every tenant may use in addition to its own policy.betas. */
@@ -52,7 +74,15 @@ export interface Config {
   /** TEST ONLY: built-in deny CIDRs to remove (e.g. "127.0.0.0/8" to reach local echo servers). */
   disableBuiltinDeny: string[];
   socksTimeoutMs: number;
-  listen: { bind: string; hostBind: string; anthropicPort: number; connectPort: number; hostPort: number; adminSocket: string };
+  listen: {
+    bind: string;
+    hostBind: string;
+    anthropicPort: number;
+    connectPort: number;
+    hostPort: number;
+    mcpPort: number;
+    adminSocket: string;
+  };
 }
 
 type Json = Record<string, unknown>;
@@ -69,7 +99,8 @@ const strArr = (v: unknown, name: string, def: string[]): string[] => {
 };
 const int = (v: unknown, name: string, def: number): number => {
   if (v === undefined) return def;
-  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) throw new Error(`config.${name} must be a non-negative integer`);
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0)
+    throw new Error(`config.${name} must be a non-negative integer`);
   return v;
 };
 
@@ -79,6 +110,7 @@ export function validateConfig(raw: unknown): Config {
   const cl = (r.connectLimits ?? {}) as Json;
   const ls = (r.listen ?? {}) as Json;
   const al = (r.anthropicLimits ?? {}) as Json;
+  const ml = (r.mcp ?? {}) as Json;
   const cfg: Config = {
     anthropicKeyFile: str(r.anthropicKeyFile, 'anthropicKeyFile'),
     upstream: str(r.upstream, 'upstream', 'https://api.anthropic.com').replace(/\/+$/, ''),
@@ -103,17 +135,42 @@ export function validateConfig(raw: unknown): Config {
     anthropicLimits: {
       bodyTimeoutMs: int(al.bodyTimeoutMs, 'anthropicLimits.bodyTimeoutMs', 60_000),
       maxInflightBodyBytes: int(al.maxInflightBodyBytes, 'anthropicLimits.maxInflightBodyBytes', 160 * 1024 * 1024),
-      maxInflightBodyBytesPerTenant: int(al.maxInflightBodyBytesPerTenant, 'anthropicLimits.maxInflightBodyBytesPerTenant', Math.min(128 * 1024 * 1024, int(al.maxInflightBodyBytes, 'anthropicLimits.maxInflightBodyBytes', 160 * 1024 * 1024))),
+      maxInflightBodyBytesPerTenant: int(
+        al.maxInflightBodyBytesPerTenant,
+        'anthropicLimits.maxInflightBodyBytesPerTenant',
+        Math.min(
+          128 * 1024 * 1024,
+          int(al.maxInflightBodyBytes, 'anthropicLimits.maxInflightBodyBytes', 160 * 1024 * 1024),
+        ),
+      ),
       socketIdleMs: int(al.socketIdleMs, 'anthropicLimits.socketIdleMs', 600_000),
       maxConnections: int(al.maxConnections, 'anthropicLimits.maxConnections', 2048),
       upstreamHeadersTimeoutMs: int(al.upstreamHeadersTimeoutMs, 'anthropicLimits.upstreamHeadersTimeoutMs', 120_000),
-      upstreamNonStreamTimeoutMs: int(al.upstreamNonStreamTimeoutMs, 'anthropicLimits.upstreamNonStreamTimeoutMs', 600_000),
+      upstreamNonStreamTimeoutMs: int(
+        al.upstreamNonStreamTimeoutMs,
+        'anthropicLimits.upstreamNonStreamTimeoutMs',
+        600_000,
+      ),
       streamIdleMs: int(al.streamIdleMs, 'anthropicLimits.streamIdleMs', 300_000),
       capWindowMinutes: int(al.capWindowMinutes, 'anthropicLimits.capWindowMinutes', 15),
       serverToolDefaultMaxUses: int(al.serverToolDefaultMaxUses, 'anthropicLimits.serverToolDefaultMaxUses', 5),
       serverToolMaxUses: int(al.serverToolMaxUses, 'anthropicLimits.serverToolMaxUses', 10),
-      serverToolResultInputTokens: int(al.serverToolResultInputTokens, 'anthropicLimits.serverToolResultInputTokens', 25_000),
+      serverToolResultInputTokens: int(
+        al.serverToolResultInputTokens,
+        'anthropicLimits.serverToolResultInputTokens',
+        25_000,
+      ),
       minOutputTokens: int(al.minOutputTokens, 'anthropicLimits.minOutputTokens', 1024),
+    },
+    mcp: {
+      holdMs: int(ml.holdMs, 'mcp.holdMs', 300_000),
+      upstreamTimeoutMs: int(ml.upstreamTimeoutMs, 'mcp.upstreamTimeoutMs', 60_000),
+      maxPendingPerTenant: int(ml.maxPendingPerTenant, 'mcp.maxPendingPerTenant', 4),
+      maxPendingTotal: int(ml.maxPendingTotal, 'mcp.maxPendingTotal', 16),
+      maxBodyBytes: int(ml.maxBodyBytes, 'mcp.maxBodyBytes', 1024 * 1024),
+      maxListBytes: int(ml.maxListBytes, 'mcp.maxListBytes', 8 * 1024 * 1024),
+      socketIdleMs: int(ml.socketIdleMs, 'mcp.socketIdleMs', 600_000),
+      callsRetentionDays: int(ml.callsRetentionDays, 'mcp.callsRetentionDays', 30),
     },
     modelHosts: strArr(r.modelHosts, 'modelHosts', ['anthropic.com']).map((h) => h.toLowerCase()),
     defaultBetas: strArr(r.defaultBetas, 'defaultBetas', [
@@ -139,6 +196,7 @@ export function validateConfig(raw: unknown): Config {
       anthropicPort: int(ls.anthropicPort, 'listen.anthropicPort', 8080),
       connectPort: int(ls.connectPort, 'listen.connectPort', 3128),
       hostPort: int(ls.hostPort, 'listen.hostPort', 8090),
+      mcpPort: int(ls.mcpPort, 'listen.mcpPort', 8081),
       adminSocket: str(ls.adminSocket, 'listen.adminSocket', '/run/nanogate/admin.sock'),
     },
   };
@@ -150,13 +208,20 @@ export function validateConfig(raw: unknown): Config {
     throw new Error('config.anthropicLimits: need 1 <= serverToolDefaultMaxUses <= serverToolMaxUses');
   }
   if (a.capWindowMinutes < 1) throw new Error('config.anthropicLimits.capWindowMinutes must be >= 1');
-  if (cfg.connectLimits.dnsPerTenant < 1 || cfg.connectLimits.dnsGlobal < 1) throw new Error('config.connectLimits dns caps must be >= 1');
+  if (cfg.connectLimits.dnsPerTenant < 1 || cfg.connectLimits.dnsGlobal < 1)
+    throw new Error('config.connectLimits dns caps must be >= 1');
   if (cfg.connectLimits.dnsPerTenant >= cfg.connectLimits.dnsGlobal) {
-    throw new Error('config.connectLimits: dnsPerTenant must be < dnsGlobal (one tenant must not be able to fill the resolver)');
+    throw new Error(
+      'config.connectLimits: dnsPerTenant must be < dnsGlobal (one tenant must not be able to fill the resolver)',
+    );
   }
   if (a.maxInflightBodyBytesPerTenant < 1 || a.maxInflightBodyBytesPerTenant > a.maxInflightBodyBytes) {
     throw new Error('config.anthropicLimits: need 1 <= maxInflightBodyBytesPerTenant <= maxInflightBodyBytes');
   }
+  if (cfg.mcp.holdMs < 1 || cfg.mcp.upstreamTimeoutMs < 1)
+    throw new Error('config.mcp: holdMs and upstreamTimeoutMs must be >= 1');
+  if (cfg.mcp.maxPendingPerTenant > cfg.mcp.maxPendingTotal)
+    throw new Error('config.mcp: maxPendingPerTenant must be <= maxPendingTotal');
   new URL(cfg.upstream);
   return cfg;
 }
@@ -170,13 +235,22 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   if (env.NANOGATE_ANTHROPIC_PORT) listen.anthropicPort = Number(env.NANOGATE_ANTHROPIC_PORT);
   if (env.NANOGATE_CONNECT_PORT) listen.connectPort = Number(env.NANOGATE_CONNECT_PORT);
   if (env.NANOGATE_HOST_PORT) listen.hostPort = Number(env.NANOGATE_HOST_PORT);
+  if (env.NANOGATE_MCP_PORT) listen.mcpPort = Number(env.NANOGATE_MCP_PORT);
   return validateConfig({ ...raw, listen });
 }
 
 export function readApiKey(file: string): string {
   // The old install stored this secret as an env line (`ANTHROPIC_API_KEY=...`): accept it as well as the raw key.
-  const line = fs.readFileSync(file, 'utf8').split('\n').find((l) => l.trim()) ?? '';
-  const k = line.trim().replace(/^(?:export\s+)?ANTHROPIC_API_KEY\s*=\s*/, '').replace(/^(["'])(.*)\1$/, '$2').trim();
+  const line =
+    fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .find((l) => l.trim()) ?? '';
+  const k = line
+    .trim()
+    .replace(/^(?:export\s+)?ANTHROPIC_API_KEY\s*=\s*/, '')
+    .replace(/^(["'])(.*)\1$/, '$2')
+    .trim();
   if (!k) throw new Error('anthropic key file is empty');
   return k;
 }

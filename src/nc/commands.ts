@@ -18,7 +18,7 @@ import { isContainerRunning } from '../container-runner.js';
 import { withExistingMailboxSession } from '../session-manager.js';
 import { escapeMd, fmtUsd, topicThreadId } from './util.js';
 
-async function hasProcessingClaim(s: { id: string; agent_group_id: string }): Promise<boolean> {
+export async function hasProcessingClaim(s: { id: string; agent_group_id: string }): Promise<boolean> {
   return withExistingMailboxSession(s.agent_group_id, s.id, (m) => m.getProcessingClaims().length > 0)
     .then((r) => r === true)
     .catch(() => false);

@@ -190,7 +190,7 @@ let
     # container, which `-p 127.0.0.1:8090:8090` cannot reach through the
     # container's netns; bind 0.0.0.0 here, the host-side publish stays loopback.
     anthropicLimits.upstreamNonStreamTimeoutMs = cfg.nanogate.upstreamNonStreamTimeoutMs;
-    listen = { bind = "0.0.0.0"; hostBind = "0.0.0.0"; anthropicPort = 8080; connectPort = 3128; hostPort = 8090; adminSocket = adminSocket; };
+    listen = { bind = "0.0.0.0"; hostBind = "0.0.0.0"; anthropicPort = 8080; connectPort = 3128; hostPort = 8090; mcpPort = 8081; adminSocket = adminSocket; };
   });
 
   # The /run dirs below are NOT systemd RuntimeDirectory=: systemd re-chowns those recursively to the unit's

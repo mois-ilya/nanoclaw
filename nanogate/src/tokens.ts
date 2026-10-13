@@ -63,28 +63,56 @@ export function revalidate(db: Db, auth: Auth): AuthResult {
 function lookupToken(db: Db, hash: string, want: TokenKind): AuthResult {
   const row = db
     .prepare('SELECT tenant_id, kind, session_key, purpose, epoch FROM tokens WHERE hash = ? AND revoked_at IS NULL')
-    .get(hash) as { tenant_id: string; kind: TokenKind; session_key: string | null; purpose: string | null; epoch: number } | undefined;
+    .get(hash) as
+    | { tenant_id: string; kind: TokenKind; session_key: string | null; purpose: string | null; epoch: number }
+    | undefined;
   if (!row || row.kind !== want) return { ok: false, reason: 'invalid' };
   const tenant = getTenant(db, row.tenant_id);
   if (!tenant || tenant.status === 'revoked' || tenant.epoch !== row.epoch) return { ok: false, reason: 'invalid' };
   if (tenant.status !== 'active') return { ok: false, reason: 'paused' };
-  return { ok: true, auth: { tokenHash: hash, kind: row.kind, tenant, sessionKey: row.session_key, purpose: row.purpose } };
+  return {
+    ok: true,
+    auth: { tokenHash: hash, kind: row.kind, tenant, sessionKey: row.session_key, purpose: row.purpose },
+  };
 }
 
 export function insertToken(
   db: Db,
-  p: { token: string; kind: TokenKind; tenantId: string; epoch: number; enc?: string; sessionKey?: string; purpose?: string; runtimeIdentity?: string },
+  p: {
+    token: string;
+    kind: TokenKind;
+    tenantId: string;
+    epoch: number;
+    enc?: string;
+    sessionKey?: string;
+    purpose?: string;
+    runtimeIdentity?: string;
+  },
 ): string {
   const hash = hashToken(p.token);
   db.prepare(
     `INSERT INTO tokens(hash, enc, kind, tenant_id, session_key, purpose, runtime_identity, epoch, created_at)
      VALUES (?,?,?,?,?,?,?,?,?)`,
-  ).run(hash, p.enc ?? null, p.kind, p.tenantId, p.sessionKey ?? null, p.purpose ?? null, p.runtimeIdentity ?? null, p.epoch, Date.now());
+  ).run(
+    hash,
+    p.enc ?? null,
+    p.kind,
+    p.tenantId,
+    p.sessionKey ?? null,
+    p.purpose ?? null,
+    p.runtimeIdentity ?? null,
+    p.epoch,
+    Date.now(),
+  );
   return hash;
 }
 
 /** Revoke by predicate; returns the revoked rows so callers can kill live work. */
-export function revokeTokens(db: Db, where: string, ...args: unknown[]): { hash: string; session_key: string | null }[] {
+export function revokeTokens(
+  db: Db,
+  where: string,
+  ...args: unknown[]
+): { hash: string; session_key: string | null }[] {
   const rows = db
     .prepare(`SELECT hash, session_key FROM tokens WHERE revoked_at IS NULL AND (${where})`)
     .all(...args) as { hash: string; session_key: string | null }[];
@@ -92,4 +120,12 @@ export function revokeTokens(db: Db, where: string, ...args: unknown[]): { hash:
   const now = Date.now();
   for (const r of rows) upd.run(now, r.hash);
   return rows;
+}
+
+/** Decrypt one of a tenant's stored secrets; null when it is not set. Only the MCP proxy reads secrets back. */
+export function getSecret(db: Db, encKey: Buffer, tenantId: string, name: string): string | null {
+  const r = db.prepare('SELECT enc FROM secrets WHERE tenant_id = ? AND name = ?').get(tenantId, name) as
+    | { enc: string }
+    | undefined;
+  return r ? decrypt(encKey, r.enc) : null;
 }

@@ -19,6 +19,7 @@ import {
   transcribe,
 } from './stt.js';
 import { getDb } from '../db/connection.js';
+import { insertTenantIfAbsent } from './store.js';
 import { setupDb } from './test-helpers.js';
 
 beforeEach(async () => {
@@ -270,6 +271,78 @@ describe('groq stt', () => {
     expect(
       groqCalls(f).map((c) => (c[1] as RequestInit & { headers: Record<string, string> }).headers.authorization),
     ).toEqual([`Bearer ${GK}`, `Bearer ${SK}`, `Bearer ${SK}`]);
+  });
+
+  const putOwn = (tgId: number, k: string) => {
+    fs.mkdirSync(`${TMP}/data/secrets/groq`, { recursive: true });
+    fs.writeFileSync(`${TMP}/data/secrets/groq/telegram_${tgId}`, `${k}\n`);
+  };
+  const authsOf = (f: typeof fetch) =>
+    groqCalls(f).map((c) => (c[1] as RequestInit & { headers: Record<string, string> }).headers.authorization);
+
+  it("the speaker's own key (by meta.userId) goes first, then the shared one, then the server's", async () => {
+    const OK = `gsk_${'o'.repeat(30)}`;
+    const SK = `gsk_${'s'.repeat(30)}`;
+    await insertTenantIfAbsent({ tgId: 5, name: 'Маша', state: 'ready' });
+    putOwn(5, OK);
+    putMini(GK);
+    putServer(SK);
+    const f = routed(() => new Response(JSON.stringify({ text: 'ok' })));
+    await transcribe(Buffer.from('a'), meta, f);
+    expect(authsOf(f)).toEqual([`Bearer ${OK}`]);
+  });
+
+  it("another user's own key is never used for this speaker", async () => {
+    const OK = `gsk_${'o'.repeat(30)}`;
+    await insertTenantIfAbsent({ tgId: 5, name: 'Маша', state: 'ready' });
+    await insertTenantIfAbsent({ tgId: 6, name: 'Петя', state: 'ready' });
+    putOwn(6, OK);
+    putMini(GK);
+    const f = routed(() => new Response(JSON.stringify({ text: 'ok' })));
+    await transcribe(Buffer.from('a'), meta, f); // speaker 5
+    expect(authsOf(f)).toEqual([`Bearer ${GK}`]);
+    const g = routed(() => new Response(JSON.stringify({ text: 'ok' })));
+    await transcribe(Buffer.from('a'), { ...meta, userId: 6 }, g);
+    expect(authsOf(g)).toEqual([`Bearer ${OK}`]);
+  });
+
+  it('a parked own key falls through to the shared key, and every distinct candidate is tried before local', async () => {
+    const OK = `gsk_${'o'.repeat(30)}`;
+    const SK = `gsk_${'s'.repeat(30)}`;
+    await insertTenantIfAbsent({ tgId: 5, name: 'Маша', state: 'ready' });
+    putOwn(5, OK);
+    putMini(GK);
+    putServer(SK);
+    // own: 401 (parked), shared: 500, server: ok
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).startsWith('https://api.groq.com/')) return new Response(JSON.stringify({ text: 'локально' }));
+      const auth = (init?.headers as Record<string, string>).authorization;
+      if (auth === `Bearer ${OK}`) return new Response('no', { status: 401 });
+      if (auth === `Bearer ${GK}`) return new Response('x', { status: 500 });
+      return new Response(JSON.stringify({ text: 'сервер' }));
+    }) as unknown as typeof fetch;
+    expect(await transcribe(Buffer.from('a'), meta, f)).toEqual({ text: 'сервер', lang: undefined });
+    expect(authsOf(f)).toEqual([`Bearer ${OK}`, `Bearer ${GK}`, `Bearer ${SK}`]);
+    // the next voice skips the parked own key (and the 500 key is retried: it was only a failure)
+    const g = routed(() => new Response(JSON.stringify({ text: 'ok' })));
+    await transcribe(Buffer.from('a'), meta, g);
+    expect(authsOf(g)).toEqual([`Bearer ${GK}`]);
+  });
+
+  it('the same key in two places is tried once', async () => {
+    await insertTenantIfAbsent({ tgId: 5, name: 'Маша', state: 'ready' });
+    putOwn(5, GK);
+    putMini(GK);
+    const f = routed(() => new Response('x', { status: 500 }));
+    expect(await transcribe(Buffer.from('a'), meta, f)).toEqual({ text: 'локально', lang: undefined });
+    expect(authsOf(f)).toEqual([`Bearer ${GK}`]);
+  });
+
+  it('a user without a tenant row still gets the shared key', async () => {
+    putMini(GK);
+    const f = routed(() => new Response(JSON.stringify({ text: 'ok' })));
+    await transcribe(Buffer.from('a'), { ...meta, userId: 999 }, f);
+    expect(authsOf(f)).toEqual([`Bearer ${GK}`]);
   });
 
   it('Mini App key wins over the server key', async () => {

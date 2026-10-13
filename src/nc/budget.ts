@@ -208,7 +208,11 @@ export async function pollBudgetEventsOnce(): Promise<void> {
   for (const e of events.slice().sort((a, b) => a.id - b.id)) {
     if (e.id <= lastSeen) continue;
     try {
-      await handleBudgetEvent(e);
+      if (e.type === 'mcp_key_rejected') {
+        // Lazy: mcp-connectors -> config-apply -> commands -> budget would otherwise be an import cycle.
+        const id = (e.payload as { connectorId?: unknown } | null)?.connectorId;
+        if (typeof id === 'string') await (await import('./mcp-connectors.js')).markKeyRejected(id);
+      } else await handleBudgetEvent(e);
     } catch (err) {
       const n = (eventTries.get(e.id) ?? 0) + 1;
       eventTries.set(e.id, n);

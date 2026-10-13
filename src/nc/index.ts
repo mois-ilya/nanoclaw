@@ -6,14 +6,17 @@
  * the nanogate tenant resolver, the Telegram adapter hooks, and the host
  * start/shutdown callbacks.
  */
+import { registerSweepDuty } from '../host-sweep.js';
 import { onHostPrepare, onHostShutdown, onHostStart } from '../host-lifecycle.js';
 import { log } from '../log.js';
 import { bindAdapter } from './bind.js';
 import { alertOwner, recordError, startAlerts, stopAlerts } from './alerts.js';
 import { maybeSendDigest } from './digest.js';
 import { startBudgetPolling, stopBudgetPolling } from './budget.js';
+import { applyConfigSweep, stopConfigApply } from './config-apply.js';
 import { syncOwnerConnector } from './connector.js';
 import { ownerTgId, nc } from './config.js';
+import { startConnectorSync, stopConnectorSync, syncAllConnectors } from './mcp-connectors.js';
 import { prewarmGuestToken, recoverGuestPlaceholders } from './guest.js';
 import { purgeDueTrash, removeLegacyHaTokens } from './lifecycle.js';
 import { startMiniAppServer, type RunningMiniApp } from './miniapp/server.js';
@@ -36,6 +39,7 @@ bindAdapter();
 
 let miniapp: RunningMiniApp | undefined;
 let purgeTimer: NodeJS.Timeout | undefined;
+let unregisterConfigApply: (() => void) | undefined;
 let retryTimer: NodeJS.Timeout | undefined;
 
 let prepared: { nanogateOk: boolean } | undefined;
@@ -60,7 +64,11 @@ onHostStart(async () => {
   prepared = undefined;
   const bootNanogate = async (): Promise<boolean> => {
     const r = await bootstrapOwner();
-    if (r.nanogateOk) await syncOwnerConnector();
+    if (r.nanogateOk) {
+      await syncOwnerConnector();
+      // nanogate came up after the host: the start-time sync found nobody to talk to.
+      void syncAllConnectors().catch((err) => log.warn('nc: connector sync failed', { err }));
+    }
     return r.nanogateOk;
   };
   if (!nanogateOk) {
@@ -94,6 +102,9 @@ onHostStart(async () => {
   void prewarmGuestToken();
   await recoverGuestPlaceholders().catch((err) => log.warn('nc: guest recovery failed', { err }));
   startBudgetPolling();
+  // Connector copies at nanogate (full replace, then every 5 minutes) and the apply-config duty of the host sweep.
+  startConnectorSync();
+  unregisterConfigApply = registerSweepDuty(async () => void (await applyConfigSweep()));
   startAlerts();
   startTaskFailureSweep();
   // Non-critical steps never take the whole host down (a bound port is not a reason to stop answering chats).
@@ -126,6 +137,9 @@ onHostStart(async () => {
 
 onHostShutdown(async () => {
   stopBudgetPolling();
+  stopConnectorSync();
+  stopConfigApply();
+  unregisterConfigApply?.();
   stopAlerts();
   stopTaskFailureSweep();
   if (purgeTimer) clearInterval(purgeTimer);

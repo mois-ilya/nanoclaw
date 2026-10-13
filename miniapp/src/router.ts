@@ -1,6 +1,20 @@
 export type RouteName =
-  | 'home' | 'memory' | 'memoryFile' | 'prompt' | 'skills' | 'tasks' | 'task' | 'usage'
-  | 'connections' | 'settings' | 'requests' | 'friends' | 'friend' | 'guest' | 'system';
+  | 'home'
+  | 'memory'
+  | 'memoryFile'
+  | 'prompt'
+  | 'skills'
+  | 'tasks'
+  | 'task'
+  | 'usage'
+  | 'connections'
+  | 'connectors'
+  | 'settings'
+  | 'requests'
+  | 'friends'
+  | 'friend'
+  | 'guest'
+  | 'system';
 
 export interface Route {
   name: RouteName;
@@ -9,18 +23,43 @@ export interface Route {
 }
 
 const SIMPLE: Record<string, RouteName> = {
-  home: 'home', prompt: 'prompt', skills: 'skills', tasks: 'tasks', usage: 'usage',
-  connections: 'connections', settings: 'settings', requests: 'requests', friends: 'friends',
-  guest: 'guest', system: 'system',
+  home: 'home',
+  prompt: 'prompt',
+  skills: 'skills',
+  tasks: 'tasks',
+  usage: 'usage',
+  connections: 'connections',
+  connectors: 'connectors',
+  settings: 'settings',
+  requests: 'requests',
+  friends: 'friends',
+  guest: 'guest',
+  system: 'system',
 };
 
 /** `startapp` values that open a screen */
 export const START_PARAMS: Record<string, RouteName> = {
-  usage: 'usage', requests: 'requests', approvals: 'requests', tasks: 'tasks', connections: 'connections', guest: 'guest',
-  friends: 'friends', system: 'system', settings: 'settings', memory: 'memory',
+  usage: 'usage',
+  requests: 'requests',
+  approvals: 'requests',
+  tasks: 'tasks',
+  connections: 'connections',
+  connectors: 'connectors',
+  guest: 'guest',
+  friends: 'friends',
+  system: 'system',
+  settings: 'settings',
+  memory: 'memory',
 };
 
-export const OWNER_ONLY: ReadonlySet<RouteName> = new Set(['requests', 'friends', 'friend', 'guest', 'system']);
+export const OWNER_ONLY: ReadonlySet<RouteName> = new Set([
+  'connectors',
+  'requests',
+  'friends',
+  'friend',
+  'guest',
+  'system',
+]);
 
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#\/?/, '');
@@ -42,12 +81,18 @@ export function parseHash(hash: string): Route {
 export function toHash(r: Route): string {
   const e = (s: string) => encodeURIComponent(s);
   switch (r.name) {
-    case 'home': return '#/';
-    case 'memory': return r.arg ? `#/memory?dir=${e(r.arg)}` : '#/memory';
-    case 'memoryFile': return `#/memory/file?path=${e(r.arg ?? '')}`;
-    case 'task': return `#/tasks/${e(r.arg ?? '')}`;
-    case 'friend': return `#/friends/${e(r.arg ?? '')}`;
-    default: return `#/${r.name}`;
+    case 'home':
+      return '#/';
+    case 'memory':
+      return r.arg ? `#/memory?dir=${e(r.arg)}` : '#/memory';
+    case 'memoryFile':
+      return `#/memory/file?path=${e(r.arg ?? '')}`;
+    case 'task':
+      return `#/tasks/${e(r.arg ?? '')}`;
+    case 'friend':
+      return `#/friends/${e(r.arg ?? '')}`;
+    default:
+      return `#/${r.name}`;
   }
 }
 
@@ -58,15 +103,20 @@ function dirOf(path: string): string {
 
 export function parentOf(r: Route): Route | null {
   switch (r.name) {
-    case 'home': return null;
-    case 'memory': return r.arg ? { name: 'memory', arg: dirOf(r.arg) || undefined } : { name: 'home' };
+    case 'home':
+      return null;
+    case 'memory':
+      return r.arg ? { name: 'memory', arg: dirOf(r.arg) || undefined } : { name: 'home' };
     case 'memoryFile': {
       const d = dirOf(r.arg ?? '');
       return { name: 'memory', arg: d || undefined };
     }
-    case 'task': return { name: 'tasks' };
-    case 'friend': return { name: 'friends' };
-    default: return { name: 'home' };
+    case 'task':
+      return { name: 'tasks' };
+    case 'friend':
+      return { name: 'friends' };
+    default:
+      return { name: 'home' };
   }
 }
 

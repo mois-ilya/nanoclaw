@@ -41,6 +41,9 @@ import { friendPersona } from './templates.js';
 import { escapeMd, fmtUsd, topicThreadId, withLock } from './util.js';
 import { setChatSurface } from './surface.js';
 
+/** Skills a friend gets at provisioning and may switch in the Mini App; the rest of container/skills/ is owner-only. */
+export const FRIEND_SKILLS: readonly string[] = ['agent-browser'];
+
 const STEPS = [
   'user',
   'group',
@@ -188,7 +191,7 @@ async function runStep(step: Step, tgId: number): Promise<void> {
         timezone: prefs.tz,
         assistant_name: nc.botName(),
       });
-      await updateContainerConfigJson(ag.id, 'skills', ['agent-browser']);
+      await updateContainerConfigJson(ag.id, 'skills', [...FRIEND_SKILLS]);
       await putPrefs(t.user_id, prefs);
       return;
     }

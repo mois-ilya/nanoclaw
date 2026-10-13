@@ -77,6 +77,22 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('ok');
   });
 
+  it('does not kill a held MCP call: a tool_use heartbeat after the claim and 6 minutes of silence is ok', () => {
+    // nanogate holds a dangerous connector call up to 5 minutes for a human; the runner only writes the
+    // heartbeat on the tool_use event, then nothing until the result. Neither the claim nor the ceiling may fire.
+    const claimedMsAgo = 6 * 60_000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - claimedMsAgo + 1_000, // tool_use event, just after the claim
+      containerStartedAtMs: BASE - 10 * 60_000,
+      containerState: null,
+      claims: [claim('m1', claimedMsAgo)],
+      idleLimitMs: 5 * 60_000,
+      hasDueMessages: false,
+    });
+    expect(res).toEqual({ action: 'ok' });
+  });
+
   it('kills on ceiling using container spawn time when heartbeat never ticked', () => {
     // Regression: a container spawns, finds nothing that warrants an SDK
     // event, and sits idle indefinitely with no heartbeat file ever created.

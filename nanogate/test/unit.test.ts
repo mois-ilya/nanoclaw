@@ -7,6 +7,8 @@ import { checkRequest, isRejection, normalizePolicy, tailnetAllowed } from '../s
 import { parseAuthority } from '../src/connect-proxy.js';
 import { hashToken, mintToken, encrypt, decrypt } from '../src/tokens.js';
 import { validateConfig, readApiKey } from '../src/config.js';
+import { argFields } from '../src/mcp-approvals.js';
+import { classify, parseRpc } from '../src/mcp-proxy.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,14 +47,22 @@ describe('authority parsing', () => {
 });
 
 describe('sse usage parser', () => {
-  const start = 'event: message_start\r\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":7,"output_tokens":1}}}\r\n\r\n';
-  const delta = 'event: message_delta\r\ndata: {"type":"message_delta","usage":{"output_tokens":9,"server_tool_use":{"web_search_requests":1}}}\r\n\r\n';
+  const start =
+    'event: message_start\r\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":7,"output_tokens":1}}}\r\n\r\n';
+  const delta =
+    'event: message_delta\r\ndata: {"type":"message_delta","usage":{"output_tokens":9,"server_tool_use":{"web_search_requests":1}}}\r\n\r\n';
   it('is chunk-boundary independent, prices flat cache creation as 5m', () => {
     const p = new SseUsageParser();
     const all = Buffer.from(start + delta);
     for (let i = 0; i < all.length; i += 7) p.feed(all.subarray(i, i + 7));
     expect(p.sawDelta).toBe(true);
-    expect(p.usage()).toMatchObject({ input: 5, output: 9, cacheCreation5m: 7, cacheCreation1h: 0, serverTools: { web_search: 1 } });
+    expect(p.usage()).toMatchObject({
+      input: 5,
+      output: 9,
+      cacheCreation5m: 7,
+      cacheCreation1h: 0,
+      serverTools: { web_search: 1 },
+    });
   });
   it('drops oversized events without losing the following ones', () => {
     const p = new SseUsageParser();
@@ -66,19 +76,34 @@ describe('sse usage parser', () => {
     expect(p.sawDelta).toBe(false);
   });
   it('normalizeUsage lets the later object win', () => {
-    expect(normalizeUsage({ input_tokens: 1, output_tokens: 1 }, { output_tokens: 8, input_tokens: 3 })).toMatchObject({ input: 3, output: 8 });
+    expect(normalizeUsage({ input_tokens: 1, output_tokens: 1 }, { output_tokens: 8, input_tokens: 3 })).toMatchObject({
+      input: 3,
+      output: 8,
+    });
   });
 });
 
 describe('pricing', () => {
   const t = validatePrices(PRICES);
   it('computes cost from the table with 5m/1h split and server tools', () => {
-    const u = normalizeUsage({ input_tokens: 100, output_tokens: 40, cache_read_input_tokens: 20, cache_creation: { ephemeral_5m_input_tokens: 50, ephemeral_1h_input_tokens: 10 }, server_tool_use: { web_search_requests: 2 } });
+    const u = normalizeUsage({
+      input_tokens: 100,
+      output_tokens: 40,
+      cache_read_input_tokens: 20,
+      cache_creation: { ephemeral_5m_input_tokens: 50, ephemeral_1h_input_tokens: 10 },
+      server_tool_use: { web_search_requests: 2 },
+    });
     expect(costMicros(t, 'm-1', u)).toBe(21154);
   });
   it('reserve is an over-estimate and server tool cap uses max_uses||10', () => {
     expect(reserveMicros(t, 'm-1', 1000, 300, 0)).toBe(15000 + 6 * 150); // bytes/2, dearest input rate
-    expect(serverToolCapMicros(t, [{ type: 'web_search_20250305', max_uses: 3 }, { type: 'web_search_20250305' }, { name: 'x' }])).toBe(13 * 10000);
+    expect(
+      serverToolCapMicros(t, [
+        { type: 'web_search_20250305', max_uses: 3 },
+        { type: 'web_search_20250305' },
+        { name: 'x' },
+      ]),
+    ).toBe(13 * 10000);
   });
   it('rejects malformed tables', () => {
     expect(() => validatePrices({ version: 'v', models: { a: { input: 1 } } })).toThrow();
@@ -87,7 +112,12 @@ describe('pricing', () => {
 
 describe('policy', () => {
   it('validates and matches tailnetAllow', () => {
-    const p = normalizePolicy({ egress: { tailnet: true, tailnetAllow: ['192.168.8.0/24:8123', '100.70.163.88/32:*', 'ha.x.ts.net:8123', '*.y.ts.net:22'] } });
+    const p = normalizePolicy({
+      egress: {
+        tailnet: true,
+        tailnetAllow: ['192.168.8.0/24:8123', '100.70.163.88/32:*', 'ha.x.ts.net:8123', '*.y.ts.net:22'],
+      },
+    });
     expect(tailnetAllowed(p, '192.168.8.5', parseIp('192.168.8.5'), 8123)).toBe(true);
     expect(tailnetAllowed(p, '192.168.8.5', parseIp('192.168.8.5'), 22)).toBe(false);
     expect(tailnetAllowed(p, '100.70.163.88', parseIp('100.70.163.88'), 9999)).toBe(true);
@@ -100,8 +130,14 @@ describe('policy', () => {
 
 describe('budget period', () => {
   it('uses the tenant timezone', () => {
-    expect(periodBounds('America/New_York', Date.UTC(2026, 9, 15))).toEqual({ start: Date.UTC(2026, 9, 1, 4), end: Date.UTC(2026, 10, 1, 4) });
-    expect(periodBounds('Asia/Tokyo', Date.UTC(2026, 11, 31, 16))).toEqual({ start: Date.UTC(2026, 11, 31, 15), end: Date.UTC(2027, 0, 31, 15) });
+    expect(periodBounds('America/New_York', Date.UTC(2026, 9, 15))).toEqual({
+      start: Date.UTC(2026, 9, 1, 4),
+      end: Date.UTC(2026, 10, 1, 4),
+    });
+    expect(periodBounds('Asia/Tokyo', Date.UTC(2026, 11, 31, 16))).toEqual({
+      start: Date.UTC(2026, 11, 31, 15),
+      end: Date.UTC(2027, 0, 31, 15),
+    });
   });
 });
 
@@ -137,12 +173,16 @@ describe('defaults', () => {
 describe('config validation', () => {
   const base = { anthropicKeyFile: '/k', encryptionKeyFile: '/e', stateDir: '/s', prices: PRICES };
   it('dnsPerTenant must be below dnsGlobal', () => {
-    expect(() => validateConfig({ ...base, connectLimits: { dnsPerTenant: 4, dnsGlobal: 4 } })).toThrow(/dnsPerTenant must be < dnsGlobal/);
+    expect(() => validateConfig({ ...base, connectLimits: { dnsPerTenant: 4, dnsGlobal: 4 } })).toThrow(
+      /dnsPerTenant must be < dnsGlobal/,
+    );
     expect(() => validateConfig({ ...base, connectLimits: { dnsPerTenant: 5, dnsGlobal: 4 } })).toThrow(/dnsPerTenant/);
     expect(() => validateConfig({ ...base, connectLimits: { dnsPerTenant: 3, dnsGlobal: 4 } })).not.toThrow();
   });
   it('per-tenant body cap may not exceed the global cap', () => {
-    expect(() => validateConfig({ ...base, anthropicLimits: { maxInflightBodyBytes: 100, maxInflightBodyBytesPerTenant: 200 } })).toThrow(/maxInflightBodyBytesPerTenant/);
+    expect(() =>
+      validateConfig({ ...base, anthropicLimits: { maxInflightBodyBytes: 100, maxInflightBodyBytesPerTenant: 200 } }),
+    ).toThrow(/maxInflightBodyBytesPerTenant/);
   });
 });
 
@@ -162,11 +202,33 @@ describe('prompt-length price tiers', () => {
   const t = validatePrices({
     version: 'v',
     models: {
-      h: { input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01, longContext: { aboveTokens: 100_000, input: 0.5, output: 2.5, cacheWrite5m: 0.625, cacheWrite1h: 1, cacheRead: 0.05 } },
+      h: {
+        input: 0.1,
+        output: 0.5,
+        cacheWrite5m: 0.125,
+        cacheWrite1h: 0.2,
+        cacheRead: 0.01,
+        longContext: {
+          aboveTokens: 100_000,
+          input: 0.5,
+          output: 2.5,
+          cacheWrite5m: 0.625,
+          cacheWrite1h: 1,
+          cacheRead: 0.05,
+        },
+      },
     },
     serverTools: {},
   });
-  const u = (input: number, cacheRead = 0) => ({ input, output: 1000, cacheCreation5m: 0, cacheCreation1h: 0, cacheRead, serverTools: {}, serviceTier: null });
+  const u = (input: number, cacheRead = 0) => ({
+    input,
+    output: 1000,
+    cacheCreation5m: 0,
+    cacheCreation1h: 0,
+    cacheRead,
+    serverTools: {},
+    serviceTier: null,
+  });
 
   it('uses the base prices up to the threshold and the long-context prices above it (cache reads count)', () => {
     expect(costMicros(t, 'h', u(100_000))).toBe(Math.ceil(100_000 * 0.1 + 1000 * 0.5));
@@ -174,7 +236,14 @@ describe('prompt-length price tiers', () => {
   });
 
   it('rejects a malformed tier', () => {
-    expect(() => validatePrices({ version: 'v', models: { h: { input: 1, output: 1, cacheWrite5m: 1, cacheWrite1h: 1, cacheRead: 1, longContext: { aboveTokens: 0 } } } })).toThrow(/aboveTokens/);
+    expect(() =>
+      validatePrices({
+        version: 'v',
+        models: {
+          h: { input: 1, output: 1, cacheWrite5m: 1, cacheWrite1h: 1, cacheRead: 1, longContext: { aboveTokens: 0 } },
+        },
+      }),
+    ).toThrow(/aboveTokens/);
   });
 
   it('the shipped default price file is valid and covers the default models and tools', () => {
@@ -199,21 +268,42 @@ describe('Claude Code tool search and 1h cache request shape', () => {
     tools: [
       { name: 'Bash', description: 'd', input_schema: { type: 'object', properties: {} } },
       { name: 'ToolSearch', description: 'd', input_schema: { type: 'object', properties: {} } },
-      { name: 'mcp__ext__ping', description: 'd', input_schema: { type: 'object', properties: {} }, defer_loading: true },
+      {
+        name: 'mcp__ext__ping',
+        description: 'd',
+        input_schema: { type: 'object', properties: {} },
+        defer_loading: true,
+      },
     ],
     messages: [
       { role: 'user', content: [{ type: 'text', text: 'hi' }] },
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'ToolSearch', input: { query: 'select:mcp__ext__ping' }, cache_control: cc }] },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'toolu_1',
+            name: 'ToolSearch',
+            input: { query: 'select:mcp__ext__ping' },
+            cache_control: cc,
+          },
+        ],
+      },
       {
         role: 'user',
         content: [
-          { type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'tool_reference', tool_name: 'mcp__ext__ping' }] },
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_1',
+            content: [{ type: 'tool_reference', tool_name: 'mcp__ext__ping' }],
+          },
           { type: 'text', text: 'Tool loaded.' },
         ],
       },
     ],
   });
-  const betas = 'claude-code-20250219,advanced-tool-use-2025-11-20,extended-cache-ttl-2025-04-11,mid-conversation-system-2026-04-07';
+  const betas =
+    'claude-code-20250219,advanced-tool-use-2025-11-20,extended-cache-ttl-2025-04-11,mid-conversation-system-2026-04-07';
 
   it('passes the request unchanged and keeps the tool-search and 1h-cache betas', () => {
     const r = checkRequest(policy, PRICES, cfg.defaultBetas, body(), betas, true);
@@ -231,7 +321,122 @@ describe('Claude Code tool search and 1h cache request shape', () => {
   });
 
   it('prices 1h cache writes at the 1h rate, not the 5m rate', () => {
-    const u = normalizeUsage({ input_tokens: 0, output_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000 } });
+    const u = normalizeUsage({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000 },
+    });
     expect(costMicros(PRICES as never, 'm-1', u)).toBe(1000 * 6);
+  });
+});
+
+describe('mcp classify (asks)', () => {
+  it('unknown and non-read-only tools ask; read-only passes; policy overrides either way', () => {
+    expect(classify({}, 't', undefined)).toBe(true);
+    expect(classify({}, 't', false)).toBe(true);
+    expect(classify({}, 't', true)).toBe(false);
+    expect(classify({ t: 'ask' }, 't', true)).toBe(true);
+    expect(classify({ t: 'auto' }, 't', false)).toBe(false);
+    expect(classify({ t: 'auto' }, 't', undefined)).toBe(false);
+    expect(classify({ other: 'auto' }, 't', false)).toBe(true);
+    // inherited property names are not policy entries
+    expect(classify({}, 'constructor', true)).toBe(false);
+    expect(classify({}, '__proto__', undefined)).toBe(true);
+  });
+});
+
+describe('mcp card fields', () => {
+  it('one field per top-level argument; strings as-is, the rest as JSON; short text, longer long_text', () => {
+    expect(argFields({ title: 'hi', n: 3, flag: true, list: [1, 2], none: null })).toEqual([
+      { label: 'title', type: 'text', value: 'hi' },
+      { label: 'n', type: 'text', value: '3' },
+      { label: 'flag', type: 'text', value: 'true' },
+      { label: 'list', type: 'text', value: '[1,2]' },
+      { label: 'none', type: 'text', value: 'null' },
+    ]);
+    const f = argFields({ body: 'x'.repeat(81) })[0]!;
+    expect(f.type).toBe('long_text');
+    expect(argFields(undefined)).toEqual([]);
+    expect(argFields(null)).toEqual([]);
+  });
+
+  it('truncates with an explicit marker: 1200 for long_text (and never past the host validator limits)', () => {
+    const f = argFields({ body: 'y'.repeat(5000) })[0]!;
+    expect(f.value).toBe(`${'y'.repeat(1200)}… (+3800 симв.)`);
+    expect(f.value.length).toBeLessThan(32768);
+    const long = argFields({ k: 'z'.repeat(81) })[0]!;
+    expect(long.value.length).toBe(81);
+    const label = argFields({ ['l'.repeat(500)]: 1 })[0]!.label;
+    expect(label.length).toBeLessThan(200); // gatewayApprovalPresentation: label <= 200
+  });
+
+  it('masks secret-named fields at any depth and keeps the rest', () => {
+    const f = argFields({
+      token: 'a',
+      Password: 'b',
+      api_key: 'c',
+      Authorization: 'd',
+      client_secret: 'e',
+      cfg: { nested: { accessToken: 'f', keep: 'visible' }, list: [{ secret: 'g', ok: 1 }] },
+    });
+    const all = JSON.stringify(f);
+    for (const leak of ['"a"', '"b"', '"c"', '"d"', '"e"', '"f"', '"g"']) expect(all).not.toContain(leak);
+    for (const name of ['token', 'Password', 'api_key', 'Authorization', 'client_secret'])
+      expect(f.find((x) => x.label === name)!.value).toBe('•••');
+    expect(all).toContain('visible');
+    expect(all).toContain('•••');
+  });
+
+  it('does not show a subtree that is too deep to check', () => {
+    let deep: unknown = { password: 'hunter2' };
+    for (let i = 0; i < 12; i++) deep = { n: deep };
+    expect(JSON.stringify(argFields({ cfg: deep }))).not.toContain('hunter2');
+  });
+
+  it('caps at 12 fields with a trailing "ещё N полей" field', () => {
+    const args = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, i]));
+    const f = argFields(args);
+    expect(f).toHaveLength(12);
+    expect(f[10]!.label).toBe('k10');
+    expect(f[11]).toEqual({ label: '…', type: 'text', value: 'ещё 9 полей' });
+    expect(argFields(Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`k${i}`, i])))).toHaveLength(12);
+    expect(argFields({ a: 1 })).toHaveLength(1);
+  });
+});
+
+describe('mcp parseRpc', () => {
+  it('reads JSON and SSE bodies and skips junk', () => {
+    expect(parseRpc('application/json', '{"id":1,"result":{}}')).toEqual([{ id: 1, result: {} }]);
+    expect(
+      parseRpc('text/event-stream', 'event: message\ndata: {"id":2}\n\n: ping\n\ndata: nope\n\ndata: {"id":3}\n\n'),
+    ).toEqual([{ id: 2 }, { id: 3 }]);
+    expect(parseRpc('application/json', 'garbage')).toEqual([]);
+  });
+});
+
+describe('mcp config', () => {
+  it('has defaults, validates, and mcpPort follows listen', () => {
+    const base = {
+      anthropicKeyFile: 'k',
+      stateDir: 's',
+      encryptionKeyFile: 'e',
+      prices: { version: 'v', models: {}, serverTools: {} },
+    };
+    const c = validateConfig(base);
+    expect(c.listen.mcpPort).toBe(8081);
+    expect(c.mcp).toEqual({
+      holdMs: 300000,
+      upstreamTimeoutMs: 60000,
+      maxPendingPerTenant: 4,
+      maxPendingTotal: 16,
+      maxBodyBytes: 1048576,
+      maxListBytes: 8388608,
+      socketIdleMs: 600000,
+      callsRetentionDays: 30,
+    });
+    expect(() => validateConfig({ ...base, mcp: { holdMs: -1 } })).toThrow(/mcp.holdMs/);
+    expect(() => validateConfig({ ...base, mcp: { maxPendingPerTenant: 9, maxPendingTotal: 3 } })).toThrow(
+      /maxPendingPerTenant/,
+    );
   });
 });

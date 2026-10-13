@@ -72,6 +72,34 @@ describe('budget events', () => {
   });
 });
 
+describe('mcp_key_rejected', () => {
+  // The poll cursor is module state that only grows: ids stay between the neighbouring tests' (7 and 11).
+  it('marks the connector key as rejected (not a budget event) and acks it', async () => {
+    const { createConnector, getConnector, saveConnectorKey } = await import('./mcp-connectors.js');
+    const probe = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const t = (await (await import('./store.js')).getTenantByTg(FRIEND_A))!;
+    const row = await createConnector(t.user_id, 'github');
+    await saveConnectorKey(t, row.id, `ghp_${'a1B2'.repeat(9)}`);
+    expect((await getConnector(row.id))!.key_status).toBe('ok');
+    ng.events.mockResolvedValueOnce([
+      { id: 8, tenantId: t.user_id, type: 'mcp_key_rejected', payload: { connectorId: row.id }, createdAt: 1 },
+      {
+        id: 9,
+        tenantId: t.user_id,
+        type: 'mcp_key_rejected',
+        payload: { connectorId: 'github-00000000' },
+        createdAt: 2,
+      },
+      { id: 10, tenantId: t.user_id, type: 'mcp_key_rejected', payload: {}, createdAt: 3 },
+    ]);
+    await pollBudgetEventsOnce();
+    expect((await getConnector(row.id))!.key_status).toBe('rejected');
+    expect(ng.ackEvents).toHaveBeenCalledWith(10);
+    expect(fake.sent).toEqual([]); // no budget notice for it
+    probe.mockRestore();
+  });
+});
+
 describe('durable budget state', () => {
   it('the 80 % note is stored and survives a restart', async () => {
     await handleBudgetEvent({ tenantId: `telegram:${FRIEND_A}`, type: 'budget_80' });

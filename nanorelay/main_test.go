@@ -11,6 +11,10 @@ func TestParseMap(t *testing.T) {
 	if err != nil || len(r) != 2 || r[1].listen != ":3128" || r[1].target != "nanogate:3128" {
 		t.Fatalf("got %v %v", r, err)
 	}
+	r3, err := parseMap("8080=nanogate:8080,3128=nanogate:3128,8081=nanogate:8081")
+	if err != nil || len(r3) != 3 || r3[2].listen != ":8081" || r3[2].target != "nanogate:8081" {
+		t.Fatalf("three routes: got %v %v", r3, err)
+	}
 	for _, bad := range []string{"", "8080", "8080=", "=x:1", "8080=nohostport"} {
 		if _, err := parseMap(bad); err == nil {
 			t.Fatalf("expected error for %q", bad)

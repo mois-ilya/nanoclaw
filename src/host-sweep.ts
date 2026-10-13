@@ -48,6 +48,16 @@ const SWEEP_INTERVAL_MS = 60_000;
  */
 export const RECONCILE_CONCURRENCY = 8;
 
+/**
+ * Product duties that ride the same tick (best-effort, run after the orphan-container stop). A product module
+ * registers one at import; the sweep never imports a product module itself.
+ */
+const sweepDuties = new Set<() => Promise<void>>();
+export function registerSweepDuty(duty: () => Promise<void>): () => void {
+  sweepDuties.add(duty);
+  return () => void sweepDuties.delete(duty);
+}
+
 const INBOX_SWEEP_EVERY_MS = 60 * 60 * 1000;
 let lastInboxSweepMs = 0;
 
@@ -119,6 +129,13 @@ export function startHostSweep(): void {
             sweepInboxes();
           } catch (err) {
             log.error('Inbox sweep failed', { err });
+          }
+        }
+        for (const duty of [...sweepDuties]) {
+          try {
+            await duty();
+          } catch (err) {
+            log.error('Sweep duty failed', { err });
           }
         }
       },

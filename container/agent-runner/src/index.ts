@@ -27,6 +27,7 @@ import { trustGatewayCaForChromium } from './browser-trust.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
+import { withGatewayAuth } from './gateway-auth.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
 import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
@@ -117,7 +118,7 @@ async function main(): Promise<void> {
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
     // Plugin-shipped servers get ${PLUGIN_ROOT}/${PLUGIN_DATA} expansion and
     // the two injected env vars; everything else passes through untouched.
-    mcpServers[name] = resolvePluginServer(serverConfig);
+    mcpServers[name] = withGatewayAuth(resolvePluginServer(serverConfig));
     log(
       serverConfig.type === 'http'
         ? `Additional MCP server: ${name} (HTTP)`

@@ -23,7 +23,7 @@ vi.mock('./container-runner.js', () => ({ stopOrphanedSessions: vi.fn() }));
 import { stopOrphanedSessions } from './container-runner.js';
 import { getActiveSessions } from './db/sessions.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
-import { RECONCILE_CONCURRENCY, startHostSweep, stopHostSweep } from './host-sweep.js';
+import { RECONCILE_CONCURRENCY, registerSweepDuty, startHostSweep, stopHostSweep } from './host-sweep.js';
 import { sweepAwaitingReasonRejects } from './modules/approvals/index.js';
 import { reconcileSession } from './reconcile-session.js';
 
@@ -155,5 +155,20 @@ describe('sweep over the workqueue', () => {
 
     await runSweepTick();
     expect(stopOrphanedSessions).toHaveBeenCalledTimes(3);
+  });
+
+  it('runs registered product duties every tick; a throwing duty neither blocks the others nor the re-arm', async () => {
+    const ok = vi.fn(async () => undefined);
+    const boom = vi.fn(async () => {
+      throw new Error('duty down');
+    });
+    const off = [registerSweepDuty(boom), registerSweepDuty(ok)];
+    await runSweepTick();
+    await runSweepTick();
+    expect(boom).toHaveBeenCalledTimes(2);
+    expect(ok).toHaveBeenCalledTimes(2);
+    off.forEach((f) => f());
+    await runSweepTick();
+    expect(ok).toHaveBeenCalledTimes(2);
   });
 });

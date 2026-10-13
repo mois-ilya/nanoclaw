@@ -1,12 +1,18 @@
 /** Registers the host-owned platform layer (L0) with the project-document composer. */
-import { setDisabledToolsProvider } from '../container-config.js';
+import {
+  setConfigChangedListener,
+  setDisabledToolsProvider,
+  setManagedMcpServersProvider,
+} from '../container-config.js';
 import { setGroupResourceFilter } from '../cli/guard.js';
 import { setSelfModVeto } from '../modules/self-mod/guard.js';
 import { setAgentsCreateVeto } from '../modules/agent-to-agent/guard.js';
 import { setModuleDocExcluder, setPlatformLayerProvider } from '../project-doc-compose.js';
 import { setSessionEnvProvider } from '../session-env.js';
 import type { AgentGroup } from '../types.js';
+import { markGroupConfigDirty } from './config-apply.js';
 import { nc, ownerTgId } from './config.js';
+import { managedServersFor } from './mcp-connectors.js';
 import { getPrefs, getTenantByGroup } from './store.js';
 import { platformLayer } from './templates.js';
 import { ownerAgentGroupId } from './tenants.js';
@@ -51,6 +57,8 @@ export async function disabledToolsFor(agentGroupId: string): Promise<readonly s
 
 export function installPlatformLayer(): void {
   setDisabledToolsProvider(disabledToolsFor);
+  setManagedMcpServersProvider(managedServersFor);
+  setConfigChangedListener(markGroupConfigDirty);
   setSessionEnvProvider(sessionEnvFor);
   setPlatformLayerProvider(platformFor);
   setModuleDocExcluder(moduleDocsExcludedFor);

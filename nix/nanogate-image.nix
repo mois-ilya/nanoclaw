@@ -19,7 +19,7 @@ in
     User = "65532:65532";
     Entrypoint = [ "${nanogate}/bin/nanogate" ];
     Volumes = { "/var/lib/nanogate" = { }; };
-    ExposedPorts = { "8080/tcp" = { }; "3128/tcp" = { }; "8090/tcp" = { }; };
+    ExposedPorts = { "8080/tcp" = { }; "3128/tcp" = { }; "8090/tcp" = { }; "8081/tcp" = { }; };
     Env = [ "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt" ];
   };
 }).overrideAttrs (old: {

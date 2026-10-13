@@ -57,9 +57,13 @@ describe('sessions', () => {
 
   it('adopt after session-ended release does not resurrect the token', async () => {
     const t = (await ensure('create')).json.token;
-    expect((await g.admin('POST', '/sessions/release', { sessionKey: 'sess-1', kind: 'host-detached' })).json.revoked).toBe(0);
+    expect(
+      (await g.admin('POST', '/sessions/release', { sessionKey: 'sess-1', kind: 'host-detached' })).json.revoked,
+    ).toBe(0);
     expect((await g.messages(t, 'json')).status).toBe(200);
-    expect((await g.admin('POST', '/sessions/release', { sessionKey: 'sess-1', kind: 'session-ended' })).json.revoked).toBe(1);
+    expect(
+      (await g.admin('POST', '/sessions/release', { sessionKey: 'sess-1', kind: 'session-ended' })).json.revoked,
+    ).toBe(1);
     expect((await g.messages(t, 'json')).status).toBe(401);
     expect((await ensure('adopt')).status).toBe(409);
     const fresh = (await ensure('create')).json;
@@ -74,7 +78,9 @@ describe('sessions', () => {
     expect(r.json.revoked).toEqual(['k2']);
     expect((await g.messages(t1, 'json')).status).toBe(200);
     expect((await g.messages(t2, 'json')).status).toBe(401);
-    expect((await g.admin('GET', '/sessions')).json.sessions).toEqual([{ sessionKey: 'k1', tenantId: 't1', runtimeIdentity: 'rt-1' }]);
+    expect((await g.admin('GET', '/sessions')).json.sessions).toEqual([
+      { sessionKey: 'k1', tenantId: 't1', runtimeIdentity: 'rt-1' },
+    ]);
   });
 
   it('a session key cannot be shared across tenants; unknown tenants 404', async () => {
@@ -139,7 +145,8 @@ describe('usage', () => {
 
 describe('tenant validation', () => {
   it('rejects bad policy / budget / tz', async () => {
-    const put = (o: any) => g.admin('PUT', '/tenants/x', { kind: 'friend', policy: {}, budgetLimitMicros: null, periodTz: 'UTC', ...o });
+    const put = (o: any) =>
+      g.admin('PUT', '/tenants/x', { kind: 'friend', policy: {}, budgetLimitMicros: null, periodTz: 'UTC', ...o });
     expect((await put({ kind: 'god' })).status).toBe(400);
     expect((await put({ budgetLimitMicros: -1 })).status).toBe(400);
     expect((await put({ periodTz: 'Mars/Base' })).status).toBe(400);
@@ -148,5 +155,56 @@ describe('tenant validation', () => {
     expect((await put({ policy: { egress: { route: 'connector', connectorTenant: 'ghost' } } })).status).toBe(400);
     expect((await put({ policy: { egress: { route: 'connector', connectorTenant: 't1' } } })).status).toBe(200);
     expect((await put({})).status).toBe(200);
+  });
+});
+
+describe('mcp connector admin api', () => {
+  const body = (o: any = {}) => ({
+    tenantId: 't1',
+    title: 'GitHub',
+    url: 'https://api.githubcopilot.com/mcp/',
+    secretName: 'mcp.github-aaaa1111',
+    extraHeaders: { 'X-MCP-Readonly': 'true' },
+    toolPolicy: { create_issue: 'ask' },
+    enabled: true,
+    ...o,
+  });
+  const put = (o: any = {}, id = 'github-aaaa1111') => g.admin('PUT', `/mcp-connectors/${id}`, body(o));
+
+  it('stores a valid connector (204) and lists it', async () => {
+    expect((await put()).status).toBe(204);
+    const l = await g.admin('GET', '/mcp-connectors?tenantId=t1');
+    expect(l.json.connectors).toEqual([
+      { id: 'github-aaaa1111', tenantId: 't1', enabled: true, rev: 1, tools: [], toolsSeenAt: null },
+    ]);
+    expect((await g.admin('GET', '/mcp-connectors?tenantId=nobody')).json.connectors).toEqual([]);
+  });
+
+  it('rejects bad bodies', async () => {
+    expect((await put({ url: 'http://example.com/mcp' })).status).toBe(400);
+    expect((await put({ url: 'ftp://example.com/mcp' })).status).toBe(400);
+    expect((await put({ url: 'https://user:pw@example.com/mcp' })).status).toBe(400);
+    expect((await put({ url: 'not a url' })).status).toBe(400);
+    expect((await put({ extraHeaders: { Authorization: 'x' } })).status).toBe(400);
+    expect((await put({ extraHeaders: { 'X-MCP-Readonly': 'a\r\nb' } })).status).toBe(400);
+    expect((await put({ extraHeaders: ['x'] })).status).toBe(400);
+    expect((await put({ toolPolicy: { t: 'maybe' } })).status).toBe(400);
+    expect((await put({ enabled: 'yes' })).status).toBe(400);
+    expect((await put({ title: '' })).status).toBe(400);
+    expect((await put({ secretName: 'stt' })).status).toBe(400); // a connector may only read its own key
+    expect((await put({ secretName: 'mcp.someone-else' })).status).toBe(400);
+    expect((await put({}, 'AB')).status).toBe(400);
+    expect((await put({}, 'Upper_Case')).status).toBe(400);
+    expect((await put({ tenantId: 'ghost' })).status).toBe(404);
+    expect((await put({ tenantId: undefined })).status).toBe(400);
+    expect((await g.admin('GET', '/mcp-connectors')).json.connectors).toEqual([]);
+  });
+
+  it('a connector cannot move to another tenant', async () => {
+    await put();
+    await g.tenant('t2');
+    expect((await put({ tenantId: 't2' })).status).toBe(409);
+    // nothing was changed by the failed ones
+    expect((await g.admin('GET', '/mcp-connectors?tenantId=t1')).json.connectors).toHaveLength(1);
   });
 });

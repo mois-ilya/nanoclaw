@@ -122,3 +122,28 @@ registerMigration({
     `);
   },
 });
+
+registerMigration({
+  version: 3,
+  name: 'module:nc:mcp-connectors',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS nc_mcp_connectors (
+        id            TEXT PRIMARY KEY,
+        user_id       TEXT NOT NULL,
+        catalog_id    TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        secret_name   TEXT NOT NULL,
+        read_only     INTEGER NOT NULL DEFAULT 0,
+        tool_policy   TEXT NOT NULL DEFAULT '{}',
+        enabled       INTEGER NOT NULL DEFAULT 0,
+        key_saved_at  TEXT,
+        key_status    TEXT,
+        rev           INTEGER NOT NULL DEFAULT 1,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        UNIQUE (user_id, catalog_id)
+      );
+    `);
+  },
+});

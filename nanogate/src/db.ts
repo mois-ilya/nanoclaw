@@ -82,6 +82,41 @@ CREATE TABLE IF NOT EXISTS connectors (
   routes_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mcp_connectors (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  secret_name TEXT NOT NULL,
+  extra_headers TEXT NOT NULL DEFAULT '{}',
+  tool_policy TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL,
+  rev INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mcp_connectors_tenant ON mcp_connectors(tenant_id);
+CREATE TABLE IF NOT EXISTS mcp_tools (
+  connector_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  read_only INTEGER NOT NULL,
+  title TEXT,
+  seen_at INTEGER NOT NULL,
+  PRIMARY KEY (connector_id, name)
+);
+CREATE TABLE IF NOT EXISTS mcp_calls (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  connector_id TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  dangerous INTEGER NOT NULL,
+  decision TEXT NOT NULL,
+  status TEXT,
+  http_status INTEGER,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS mcp_calls_tenant_time ON mcp_calls(tenant_id, started_at);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -166,4 +201,216 @@ export function insertEvent(db: Db, tenantId: string, type: string, payload: unk
     JSON.stringify(payload),
     Date.now(),
   );
+}
+
+export type McpToolPolicy = Record<string, 'ask' | 'auto'>;
+
+export interface McpConnectorRow {
+  id: string;
+  tenantId: string;
+  title: string;
+  url: string;
+  secretName: string;
+  extraHeaders: Record<string, string>;
+  toolPolicy: McpToolPolicy;
+  enabled: boolean;
+  /** bumped on any change of key, url, headers or tool policy; a held call is only sent if it is unchanged */
+  rev: number;
+  updatedAt: number;
+}
+
+interface RawMcpConnector {
+  id: string;
+  tenant_id: string;
+  title: string;
+  url: string;
+  secret_name: string;
+  extra_headers: string;
+  tool_policy: string;
+  enabled: number;
+  rev: number;
+  updated_at: number;
+}
+
+const toMcpConnector = (r: RawMcpConnector): McpConnectorRow => ({
+  id: r.id,
+  tenantId: r.tenant_id,
+  title: r.title,
+  url: r.url,
+  secretName: r.secret_name,
+  extraHeaders: JSON.parse(r.extra_headers) as Record<string, string>,
+  toolPolicy: JSON.parse(r.tool_policy) as McpToolPolicy,
+  enabled: r.enabled === 1,
+  rev: r.rev,
+  updatedAt: r.updated_at,
+});
+
+export function getMcpConnector(db: Db, id: string): McpConnectorRow | null {
+  const r = db.prepare('SELECT * FROM mcp_connectors WHERE id = ?').get(id) as RawMcpConnector | undefined;
+  return r ? toMcpConnector(r) : null;
+}
+
+export function listMcpConnectors(db: Db, tenantId?: string): McpConnectorRow[] {
+  const rows = (
+    tenantId === undefined
+      ? db.prepare('SELECT * FROM mcp_connectors ORDER BY id').all()
+      : db.prepare('SELECT * FROM mcp_connectors WHERE tenant_id = ? ORDER BY id').all(tenantId)
+  ) as RawMcpConnector[];
+  return rows.map(toMcpConnector);
+}
+
+export function getMcpConnectorBySecret(db: Db, tenantId: string, secretName: string): McpConnectorRow | null {
+  const r = db
+    .prepare('SELECT * FROM mcp_connectors WHERE tenant_id = ? AND secret_name = ?')
+    .get(tenantId, secretName) as RawMcpConnector | undefined;
+  return r ? toMcpConnector(r) : null;
+}
+
+/** Insert or update; rev grows when anything the key/URL/headers/policy depends on changes. Returns the stored row. */
+export function upsertMcpConnector(db: Db, c: Omit<McpConnectorRow, 'rev' | 'updatedAt'>): McpConnectorRow {
+  const old = getMcpConnector(db, c.id);
+  const eh = JSON.stringify(c.extraHeaders);
+  const tp = JSON.stringify(c.toolPolicy);
+  const changed =
+    !old ||
+    old.tenantId !== c.tenantId ||
+    old.url !== c.url ||
+    old.secretName !== c.secretName ||
+    JSON.stringify(old.extraHeaders) !== eh ||
+    JSON.stringify(old.toolPolicy) !== tp;
+  db.prepare(
+    `INSERT INTO mcp_connectors(id, tenant_id, title, url, secret_name, extra_headers, tool_policy, enabled, rev, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,1,?)
+     ON CONFLICT(id) DO UPDATE SET tenant_id=excluded.tenant_id, title=excluded.title, url=excluded.url, secret_name=excluded.secret_name,
+       extra_headers=excluded.extra_headers, tool_policy=excluded.tool_policy, enabled=excluded.enabled,
+       rev=rev+${changed && old ? 1 : 0}, updated_at=excluded.updated_at`,
+  ).run(c.id, c.tenantId, c.title, c.url, c.secretName, eh, tp, c.enabled ? 1 : 0, Date.now());
+  return getMcpConnector(db, c.id)!;
+}
+
+export function bumpMcpRev(db: Db, id: string): void {
+  db.prepare('UPDATE mcp_connectors SET rev = rev + 1 WHERE id = ?').run(id);
+}
+
+export function deleteMcpConnector(db: Db, id: string): void {
+  db.transaction(() => {
+    db.prepare('DELETE FROM mcp_tools WHERE connector_id = ?').run(id);
+    db.prepare('DELETE FROM mcp_connectors WHERE id = ?').run(id);
+  })();
+}
+
+export interface McpToolRow {
+  name: string;
+  readOnly: boolean;
+  title: string | null;
+  seenAt: number;
+}
+
+export function listMcpTools(db: Db, connectorId: string): McpToolRow[] {
+  const rows = db
+    .prepare('SELECT name, read_only, title, seen_at FROM mcp_tools WHERE connector_id = ? ORDER BY name')
+    .all(connectorId) as { name: string; read_only: number; title: string | null; seen_at: number }[];
+  return rows.map((r) => ({ name: r.name, readOnly: r.read_only === 1, title: r.title, seenAt: r.seen_at }));
+}
+
+/** replaceAll: the list is the full inventory, tools it does not mention are forgotten. */
+export function upsertMcpTools(
+  db: Db,
+  connectorId: string,
+  tools: { name: string; readOnly: boolean; title?: string | null }[],
+  replaceAll: boolean,
+): void {
+  const now = Date.now();
+  const up = db.prepare(
+    `INSERT INTO mcp_tools(connector_id, name, read_only, title, seen_at) VALUES (?,?,?,?,?)
+     ON CONFLICT(connector_id, name) DO UPDATE SET read_only=excluded.read_only, title=excluded.title, seen_at=excluded.seen_at`,
+  );
+  db.transaction(() => {
+    if (replaceAll) db.prepare('DELETE FROM mcp_tools WHERE connector_id = ?').run(connectorId);
+    for (const t of tools) up.run(connectorId, t.name, t.readOnly ? 1 : 0, t.title ? t.title.slice(0, 120) : null, now);
+  })();
+}
+
+export interface McpCallInsert {
+  id: string;
+  tenantId: string;
+  connectorId: string;
+  sessionKey: string;
+  tool: string;
+  dangerous: boolean;
+  decision: string;
+  startedAt: number;
+}
+
+export function insertMcpCall(db: Db, c: McpCallInsert): void {
+  db.prepare(
+    `INSERT INTO mcp_calls(id, tenant_id, connector_id, session_key, tool, dangerous, decision, started_at) VALUES (?,?,?,?,?,?,?,?)`,
+  ).run(c.id, c.tenantId, c.connectorId, c.sessionKey, c.tool, c.dangerous ? 1 : 0, c.decision, c.startedAt);
+}
+
+export function finishMcpCall(
+  db: Db,
+  id: string,
+  f: { decision?: string; status: string | null; httpStatus?: number | null },
+): void {
+  db.prepare(
+    'UPDATE mcp_calls SET decision = COALESCE(?, decision), status = ?, http_status = ?, finished_at = ? WHERE id = ?',
+  ).run(f.decision ?? null, f.status, f.httpStatus ?? null, Date.now(), id);
+}
+
+export interface McpCallRow {
+  id: string;
+  connectorId: string;
+  tool: string;
+  dangerous: boolean;
+  decision: string;
+  status: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+}
+
+export function listMcpCalls(db: Db, tenantId: string, connectorId: string | undefined, limit: number): McpCallRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, connector_id, tool, dangerous, decision, status, started_at, finished_at FROM mcp_calls
+     WHERE tenant_id = ? ${connectorId ? 'AND connector_id = ?' : ''} ORDER BY started_at DESC, rowid DESC LIMIT ?`,
+    )
+    .all(...(connectorId ? [tenantId, connectorId, limit] : [tenantId, limit])) as {
+    id: string;
+    connector_id: string;
+    tool: string;
+    dangerous: number;
+    decision: string;
+    status: string | null;
+    started_at: number;
+    finished_at: number | null;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    connectorId: r.connector_id,
+    tool: r.tool,
+    dangerous: r.dangerous === 1,
+    decision: r.decision,
+    status: r.status,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+  }));
+}
+
+export function pruneMcpCalls(db: Db, now: number, retentionDays: number): number {
+  return db.prepare('DELETE FROM mcp_calls WHERE started_at < ?').run(now - retentionDays * 86_400_000).changes;
+}
+
+/** After a restart nothing is in flight: close the rows the previous process left open. */
+export function reapMcpCalls(db: Db): number {
+  const now = Date.now();
+  const a = db
+    .prepare(
+      "UPDATE mcp_calls SET decision='unavailable', finished_at=? WHERE finished_at IS NULL AND decision='pending'",
+    )
+    .run(now).changes;
+  const b = db
+    .prepare("UPDATE mcp_calls SET status='unknown', finished_at=? WHERE finished_at IS NULL")
+    .run(now).changes;
+  return a + b;
 }

@@ -93,6 +93,11 @@ export function fakeNanogate(over: Partial<Record<keyof NanogateAdmin, unknown>>
     putConnector: vi.fn(async () => undefined),
     deleteConnector: vi.fn(async () => undefined),
     probeConnector: vi.fn(async () => true),
+    putMcpConnector: vi.fn(async () => undefined),
+    deleteMcpConnector: vi.fn(async () => undefined),
+    listMcpConnectors: vi.fn(async () => []),
+    probeMcpConnector: vi.fn(async () => ({ ok: true, tools: 0 })),
+    mcpCalls: vi.fn(async () => []),
     mintHostToken: vi.fn(async () => ({ token: 'ngh_testtoken', hashPrefix: 'abcdef012345' })),
     ...over,
   };

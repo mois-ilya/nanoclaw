@@ -16,7 +16,7 @@ vi.mock('../../container-runner.js', () => ({
 const { previewGuestAnswer } = vi.hoisted(() => ({ previewGuestAnswer: vi.fn(async (q: string) => `Ответ на: ${q}`) }));
 vi.mock('../guest.js', async (orig) => ({ ...(await orig<typeof import('../guest.js')>()), previewGuestAnswer }));
 const { startProvisioning } = vi.hoisted(() => ({ startProvisioning: vi.fn(async () => true) }));
-vi.mock('../provision.js', () => ({ startProvisioning, retryProvisioning: vi.fn() }));
+vi.mock('../provision.js', () => ({ startProvisioning, retryProvisioning: vi.fn(), FRIEND_SKILLS: ['agent-browser'] }));
 
 import { closeDb, createAgentGroup } from '../../db/index.js';
 import { createSession, taskThreadId } from '../../db/sessions.js';
@@ -363,9 +363,14 @@ describe('tenant scoping of data routes', () => {
       expect(st.stt.provider).toBe('groq');
       expect(st.stt.groqKey.source).toBe('miniapp');
       expect(Date.parse(st.stt.groqKey.savedAt)).toBeGreaterThan(0);
-      expect(
-        ((await (await call(ft, 'GET', '/api/connections')).json()) as Record<string, unknown>).stt,
-      ).toBeUndefined();
+      // a friend learns only that a shared key covers him: no source, no savedAt, nothing of the owner's key
+      const friendText = await (await call(ft, 'GET', '/api/connections')).text();
+      expect(friendText).not.toContain(good);
+      expect((JSON.parse(friendText) as Record<string, unknown>).stt).toEqual({
+        provider: 'groq',
+        groqKey: null,
+        mine: { own: false, sharedAvailable: true },
+      });
       // network failure on verification: saved anyway
       groqThrows = true;
       expect((await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: `gsk_${'Z9'.repeat(15)}` })).status).toBe(
@@ -430,22 +435,6 @@ describe('product screens', () => {
     fs.writeFileSync(path.join(dir, 'tea.md'), 'любит чай');
     const home2 = (await (await call(token, 'GET', '/api/home')).json()) as { recentMemory: Array<{ path: string }> };
     expect(home2.recentMemory.map((m) => m.path)).toEqual(['tea.md']);
-  });
-
-  it('skills: only what the user really has, in Russian, with the enabled chip (no locks)', async () => {
-    const { updateContainerConfigJson, ensureContainerConfig } = await import('../../db/container-configs.js');
-    await ensureContainerConfig('ag-fa');
-    await updateContainerConfigJson('ag-fa', 'skills', ['agent-browser', 'self-customize']);
-    const { token } = await login(FRIEND_A);
-    const list = (await (await call(token, 'GET', '/api/skills')).json()) as Array<{
-      id: string;
-      name: string;
-      enabled: boolean;
-      locked: boolean;
-    }>;
-    expect(list).toEqual([
-      expect.objectContaining({ id: 'agent-browser', name: 'Браузер', enabled: true, locked: false }),
-    ]);
   });
 
   it('usage: stt is voice, agent is chat, task spend is task; voice minutes are reported; top conversations are titled', async () => {
@@ -709,6 +698,378 @@ describe('integration gaps', () => {
     } finally {
       delete process.env.NC_OWNER_CONNECTOR_SOCKS;
     }
+  });
+});
+
+describe('skills: a real switch', () => {
+  type SkillRow = { id: string; name: string; enabled: boolean; locked: boolean };
+  const getSkills = async (token: string): Promise<SkillRow[]> =>
+    (await (await call(token, 'GET', '/api/skills')).json()) as SkillRow[];
+  const kvMark = async (group: string): Promise<string | undefined> =>
+    (await import('../store.js')).kvGet(`cfg-changed:${group}`);
+
+  it('GET lists every available skill, the switched-off ones included; hidden ones never', async () => {
+    const { updateContainerConfigJson, ensureContainerConfig } = await import('../../db/container-configs.js');
+    await ensureContainerConfig('ag-fa');
+    await updateContainerConfigJson('ag-fa', 'skills', ['agent-browser', 'self-customize']);
+    const list = await getSkills((await login(FRIEND_A)).token);
+    expect(list.map((x) => x.id)).toEqual(['agent-browser', 'frontend-engineer']);
+    expect(list[0]).toMatchObject({ name: 'Браузер', enabled: true, locked: false });
+    // a friend cannot have the other skills: locked and off
+    expect(list[1]).toMatchObject({ id: 'frontend-engineer', enabled: false, locked: true });
+  });
+
+  it('PUT expands "all" into an explicit list (hidden skills kept), toggles one and marks the group', async () => {
+    const { ensureContainerConfig, getContainerConfig } = await import('../../db/container-configs.js');
+    await ensureContainerConfig('ag-owner'); // skills = 'all'
+    const { token } = await login(OWNER);
+    expect((await getSkills(token)).every((x) => x.enabled && !x.locked)).toBe(true);
+    const res = await call(token, 'PUT', '/api/skills/agent-browser', { enabled: false });
+    expect(res.status).toBe(200);
+    const after = (await res.json()) as SkillRow[];
+    expect(after.find((x) => x.id === 'agent-browser')).toMatchObject({ enabled: false });
+    expect(after.find((x) => x.id === 'frontend-engineer')).toMatchObject({ enabled: true });
+    const stored = JSON.parse((await getContainerConfig('ag-owner'))!.skills) as string[];
+    expect(stored.sort()).toEqual(['frontend-engineer', 'self-customize', 'welcome']);
+    expect(await kvMark('ag-owner')).toBeDefined();
+    // and back on
+    await call(token, 'PUT', '/api/skills/agent-browser', { enabled: true });
+    expect((JSON.parse((await getContainerConfig('ag-owner'))!.skills) as string[]).sort()).toEqual([
+      'agent-browser',
+      'frontend-engineer',
+      'self-customize',
+      'welcome',
+    ]);
+  });
+
+  it('a friend may switch only the skills he is allowed; locked -> 403, hidden/unknown -> 404, bad body -> 400', async () => {
+    const { ensureContainerConfig, updateContainerConfigJson, getContainerConfig } =
+      await import('../../db/container-configs.js');
+    await ensureContainerConfig('ag-fa');
+    await updateContainerConfigJson('ag-fa', 'skills', ['agent-browser']);
+    const { token } = await login(FRIEND_A);
+    expect((await call(token, 'PUT', '/api/skills/frontend-engineer', { enabled: true })).status).toBe(403);
+    expect((await call(token, 'PUT', '/api/skills/self-customize', { enabled: true })).status).toBe(404);
+    expect((await call(token, 'PUT', '/api/skills/nope', { enabled: true })).status).toBe(404);
+    expect((await call(token, 'PUT', '/api/skills/agent-browser', { enabled: 'yes' })).status).toBe(400);
+    expect(JSON.parse((await getContainerConfig('ag-fa'))!.skills)).toEqual(['agent-browser']);
+    expect(await kvMark('ag-fa')).toBeUndefined();
+    const res = await call(token, 'PUT', '/api/skills/agent-browser', { enabled: false });
+    expect(((await res.json()) as SkillRow[])[0]).toMatchObject({ id: 'agent-browser', enabled: false });
+    expect(JSON.parse((await getContainerConfig('ag-fa'))!.skills)).toEqual([]);
+    expect(await kvMark('ag-fa')).toBeDefined();
+  });
+
+  it('an unchanged switch writes nothing and does not mark the group', async () => {
+    const { ensureContainerConfig, updateContainerConfigJson } = await import('../../db/container-configs.js');
+    await ensureContainerConfig('ag-fa');
+    await updateContainerConfigJson('ag-fa', 'skills', ['agent-browser']);
+    const { token } = await login(FRIEND_A);
+    expect((await call(token, 'PUT', '/api/skills/agent-browser', { enabled: true })).status).toBe(200);
+    expect(await kvMark('ag-fa')).toBeUndefined();
+  });
+
+  it('a switched-off skill loses its symlink at the next spawn (it would be found by listInstalledSkills otherwise)', async () => {
+    const { syncSharedSkillLinks } = await import('../../provider-contracts/realize.js');
+    const root = path.join(TMP, 'claude-shared');
+    fs.mkdirSync(path.join(root, 'skills'), { recursive: true });
+    syncSharedSkillLinks(root, ['skills'], ['agent-browser', 'frontend-engineer'], true);
+    expect(fs.readdirSync(path.join(root, 'skills')).sort()).toEqual(['agent-browser', 'frontend-engineer']);
+    syncSharedSkillLinks(root, ['skills'], ['frontend-engineer'], true);
+    expect(fs.readdirSync(path.join(root, 'skills'))).toEqual(['frontend-engineer']);
+  });
+});
+
+describe('Groq: own key per user', () => {
+  const GOOD = `gsk_${'A1b2'.repeat(10)}`;
+  const OWNER_SHARED = `gsk_${'S9s8'.repeat(10)}`;
+  let spy: ReturnType<typeof vi.spyOn>;
+  let groqStatus = 200;
+  beforeEach(() => {
+    groqStatus = 200;
+    const real = globalThis.fetch;
+    spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).startsWith('https://api.groq.com/')) return new Response('{}', { status: groqStatus });
+      return real(input, init);
+    });
+  });
+  afterEach(() => spy.mockRestore());
+  const ownFile = (uid: number) => path.join(TMP, 'data', 'secrets', 'groq', `telegram_${uid}`);
+
+  it('a friend saves, replaces and removes his own key (verified, 0600, never read back)', async () => {
+    const { token } = await login(FRIEND_A);
+    expect((await call(token, 'PUT', '/api/secrets/groq-key', { value: 'nope' })).status).toBe(400);
+    groqStatus = 401;
+    expect((await call(token, 'PUT', '/api/secrets/groq-key', { value: GOOD })).status).toBe(400);
+    expect(fs.existsSync(ownFile(FRIEND_A))).toBe(false);
+    groqStatus = 200;
+    const res = await call(token, 'PUT', '/api/secrets/groq-key', { value: GOOD });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(GOOD);
+    expect(JSON.parse(text)).toMatchObject({
+      provider: 'groq',
+      groqKey: { source: 'own' },
+      mine: { own: true, sharedAvailable: false },
+    });
+    expect(fs.readFileSync(ownFile(FRIEND_A), 'utf8').trim()).toBe(GOOD);
+    expect(fs.statSync(ownFile(FRIEND_A)).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.dirname(ownFile(FRIEND_A))).mode & 0o777).toBe(0o700);
+    const del = await call(token, 'DELETE', '/api/secrets/groq-key');
+    expect(del.status).toBe(200);
+    expect(await del.json()).toMatchObject({ groqKey: null, mine: { own: false } });
+    expect(fs.existsSync(ownFile(FRIEND_A))).toBe(false);
+  });
+
+  it("a friend's own key never serves the owner (or another friend); the shared key does not leak to friends", async () => {
+    const { usableGroqKey, resolveGroqKey } = await import('../groq-key.js');
+    const { token: ft } = await login(FRIEND_A);
+    await call(ft, 'PUT', '/api/secrets/groq-key', { value: GOOD });
+    expect(usableGroqKey(`telegram:${FRIEND_A}`)?.key).toBe(GOOD);
+    expect(usableGroqKey(`telegram:${OWNER}`)).toBeNull();
+    expect(usableGroqKey(`telegram:${FRIEND_B}`)).toBeNull();
+    expect(usableGroqKey()).toBeNull();
+    const { token: ot } = await login(OWNER);
+    const owner = (await (await call(ot, 'GET', '/api/connections')).json()) as { stt: Record<string, unknown> };
+    expect(owner.stt).toMatchObject({ provider: 'none', groqKey: null, mine: { own: false, sharedAvailable: false } });
+    // the owner's shared key now covers friends, who still see only «shared available»
+    expect((await call(ot, 'PUT', '/api/owner/secrets/groq-key', { key: OWNER_SHARED })).status).toBe(204);
+    const fb = (await login(FRIEND_B)).token;
+    const b = await (await call(fb, 'GET', '/api/connections')).text();
+    expect(b).not.toContain(OWNER_SHARED);
+    expect(JSON.parse(b).stt).toEqual({ provider: 'groq', groqKey: null, mine: { own: false, sharedAvailable: true } });
+    expect(resolveGroqKey(`telegram:${FRIEND_A}`)?.source).toBe('own');
+    expect(resolveGroqKey(`telegram:${FRIEND_B}`)?.source).toBe('miniapp');
+  });
+
+  it('the owner has an own key too, besides the shared one', async () => {
+    const { token } = await login(OWNER);
+    await call(token, 'PUT', '/api/owner/secrets/groq-key', { key: OWNER_SHARED });
+    const res = (await (await call(token, 'PUT', '/api/secrets/groq-key', { value: GOOD })).json()) as {
+      groqKey: { source: string };
+      mine: { own: boolean; sharedAvailable: boolean };
+    };
+    // the owner's screen keeps describing the shared key; `mine` is his own
+    expect(res.groqKey.source).toBe('miniapp');
+    expect(res.mine).toEqual({ own: true, sharedAvailable: true });
+    expect(fs.existsSync(ownFile(OWNER))).toBe(true);
+  });
+});
+
+describe('connectors routes', () => {
+  const PAT = `ghp_${'a1B2'.repeat(9)}`;
+  type Conn = {
+    id: string;
+    enabled: boolean;
+    status: string;
+    warning?: string;
+    key: { set: boolean; status: string | null; savedAt?: string };
+    tools: Array<{ name: string; asks: boolean }>;
+  };
+  let github: ReturnType<typeof vi.spyOn>;
+  let githubStatus = 200;
+  let githubCalls = 0;
+  beforeEach(() => {
+    githubStatus = 200;
+    githubCalls = 0;
+    const real = globalThis.fetch;
+    github = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).startsWith('https://api.githubcopilot.com/')) {
+        githubCalls++;
+        return new Response('{}', { status: githubStatus });
+      }
+      return real(input, init);
+    });
+  });
+  afterEach(() => github.mockRestore());
+
+  async function addGithub(token: string): Promise<Conn> {
+    const res = await call(token, 'POST', '/api/connectors', { catalogId: 'github' });
+    expect(res.status).toBe(200);
+    return (await res.json()) as Conn;
+  }
+
+  it('is owner-only: every route is 403 for a friend', async () => {
+    const { token: ot } = await login(OWNER);
+    const c = await addGithub(ot);
+    const { token } = await login(FRIEND_A);
+    const routes: Array<[string, string, unknown?]> = [
+      ['GET', '/api/connectors'],
+      ['POST', '/api/connectors', { catalogId: 'github' }],
+      ['PATCH', `/api/connectors/${c.id}`, { enabled: false }],
+      ['PUT', `/api/connectors/${c.id}/key`, { value: PAT }],
+      ['DELETE', `/api/connectors/${c.id}/key`],
+      ['DELETE', `/api/connectors/${c.id}`],
+      ['GET', `/api/connectors/${c.id}/calls`],
+    ];
+    for (const [m, p, b] of routes) expect((await call(token, m, p, b)).status, `${m} ${p}`).toBe(403);
+    expect(ng.putSecret).not.toHaveBeenCalled();
+  });
+
+  it('lists the catalog and the owner connectors; a repeat add is 409, an unknown catalog id 400', async () => {
+    const { token } = await login(OWNER);
+    const empty = (await (await call(token, 'GET', '/api/connectors')).json()) as {
+      catalog: Array<{ id: string; keyUrl: string }>;
+      connectors: unknown[];
+    };
+    expect(empty.catalog).toEqual([expect.objectContaining({ id: 'github', title: 'GitHub' })]);
+    expect(empty.connectors).toEqual([]);
+    const c = await addGithub(token);
+    expect(c).toMatchObject({ enabled: false, status: 'no_key', key: { set: false, status: null }, tools: [] });
+    expect((await call(token, 'POST', '/api/connectors', { catalogId: 'github' })).status).toBe(409);
+    expect((await call(token, 'POST', '/api/connectors', { catalogId: 'nope' })).status).toBe(400);
+    expect((await call(token, 'POST', '/api/connectors', {})).status).toBe(400);
+  });
+
+  it('enabling without a key is 409 «Сначала добавьте ключ»', async () => {
+    const { token } = await login(OWNER);
+    const c = await addGithub(token);
+    const res = await call(token, 'PATCH', `/api/connectors/${c.id}`, { enabled: true });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { message: string } }).error.message).toBe('Сначала добавьте ключ');
+    expect((await call(token, 'PATCH', `/api/connectors/${c.id}`, { enabled: 'yes' })).status).toBe(400);
+    expect((await call(token, 'PATCH', `/api/connectors/${c.id}`, { toolPolicy: { a: 'maybe' } })).status).toBe(400);
+  });
+
+  it('key: a wrong shape is 400 and never probed; a rejected key is 400 «GitHub не принял ключ» and writes nothing', async () => {
+    const { token } = await login(OWNER);
+    const c = await addGithub(token);
+    expect((await call(token, 'PUT', `/api/connectors/${c.id}/key`, { value: 'abc' })).status).toBe(400);
+    expect(githubCalls).toBe(0);
+    ng.probeMcpConnector.mockResolvedValueOnce({ ok: false, error: 'key_rejected', status: 401 });
+    const res = await call(token, 'PUT', `/api/connectors/${c.id}/key`, { value: PAT });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { message: string } }).error.message).toBe('GitHub не принял ключ');
+    expect(ng.putSecret).not.toHaveBeenCalled();
+  });
+
+  it('saving the key turns the connector on; the value is in no response, no audit row, no log', async () => {
+    const logs: string[] = [];
+    const { log } = await import('../../log.js');
+    const spies = (['info', 'warn', 'error', 'debug'] as const).map((l) =>
+      vi.spyOn(log, l).mockImplementation((...a: unknown[]) => void logs.push(JSON.stringify(a))),
+    );
+    try {
+      const { token } = await login(OWNER);
+      const c = await addGithub(token);
+      const res = await call(token, 'PUT', `/api/connectors/${c.id}/key`, { value: PAT });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const j = JSON.parse(text) as Conn;
+      expect(j).toMatchObject({ enabled: true, status: 'ok', key: { set: true, status: 'ok' } });
+      expect(ng.putSecret).toHaveBeenCalledWith(`telegram:${OWNER}`, `mcp.${c.id}`, PAT);
+      const audit = JSON.stringify(
+        await (await import('../../db/connection.js')).getDb().all('SELECT * FROM nc_audit'),
+      );
+      const list = await (await call(token, 'GET', '/api/connectors')).text();
+      for (const blob of [text, audit, list, ...logs]) expect(blob).not.toContain(PAT);
+      expect(audit).toContain('connector_key_set');
+      // the group is marked so running sessions are swept
+      expect(await (await import('../store.js')).kvGet('cfg-changed:ag-owner')).toBeDefined();
+      // delete the key: off again
+      const del = await call(token, 'DELETE', `/api/connectors/${c.id}/key`);
+      expect(await del.json()).toMatchObject({ enabled: false, status: 'no_key', key: { set: false } });
+      expect(ng.deleteSecret).toHaveBeenCalledWith(`telegram:${OWNER}`, `mcp.${c.id}`);
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+  });
+
+  it('shows the tools nanogate learned and the classification; PATCH toolPolicy/readOnly return the connector', async () => {
+    const { token } = await login(OWNER);
+    const c = await addGithub(token);
+    await call(token, 'PUT', `/api/connectors/${c.id}/key`, { value: PAT });
+    ng.listMcpConnectors.mockResolvedValue([
+      {
+        id: c.id,
+        tenantId: `telegram:${OWNER}`,
+        enabled: true,
+        toolsSeenAt: 5,
+        tools: [
+          { name: 'list_issues', readOnly: true },
+          { name: 'create_issue', readOnly: false },
+        ],
+      },
+    ]);
+    const res = await call(token, 'PATCH', `/api/connectors/${c.id}`, {
+      toolPolicy: { list_issues: 'ask' },
+      readOnly: true,
+    });
+    expect(res.status).toBe(200);
+    const j = (await res.json()) as Conn & { readOnly: boolean };
+    expect(j.readOnly).toBe(true);
+    expect(j.tools).toEqual([
+      expect.objectContaining({ name: 'list_issues', policy: 'ask', asks: true }),
+      expect.objectContaining({ name: 'create_issue', policy: null, asks: true }),
+    ]);
+    expect(ng.putMcpConnector).toHaveBeenLastCalledWith(
+      c.id,
+      expect.objectContaining({ extraHeaders: { 'X-MCP-Readonly': 'true' }, toolPolicy: { list_issues: 'ask' } }),
+    );
+  });
+
+  it('a connector id of another tenant (or garbage) is 404 on every route', async () => {
+    const { createConnector } = await import('../mcp-connectors.js');
+    const foreign = await createConnector(`telegram:${FRIEND_A}`, 'github');
+    const { token } = await login(OWNER);
+    for (const [m, p, b] of [
+      ['PATCH', `/api/connectors/${foreign.id}`, { enabled: false }],
+      ['PUT', `/api/connectors/${foreign.id}/key`, { value: PAT }],
+      ['DELETE', `/api/connectors/${foreign.id}/key`],
+      ['DELETE', `/api/connectors/${foreign.id}`],
+      ['GET', `/api/connectors/${foreign.id}/calls`],
+      ['PATCH', '/api/connectors/NOT%20AN%20ID', { enabled: false }],
+    ] as Array<[string, string, unknown?]>) {
+      expect((await call(token, m, p, b)).status, `${m} ${p}`).toBe(404);
+    }
+    expect(ng.putSecret).not.toHaveBeenCalled();
+    expect(ng.deleteMcpConnector).not.toHaveBeenCalled();
+  });
+
+  it('calls: the last 20 for this connector, mapped; DELETE removes the connector (204)', async () => {
+    const { token } = await login(OWNER);
+    const c = await addGithub(token);
+    ng.mcpCalls.mockResolvedValue([
+      {
+        id: 'mc_1',
+        connectorId: c.id,
+        tool: 'list_issues',
+        dangerous: false,
+        decision: 'auto',
+        status: 'ok',
+        startedAt: 1000,
+        finishedAt: 1200,
+      },
+    ]);
+    const calls = (await (await call(token, 'GET', `/api/connectors/${c.id}/calls`)).json()) as unknown[];
+    expect(calls).toEqual([
+      {
+        at: new Date(1000).toISOString(),
+        tool: 'list_issues',
+        dangerous: false,
+        decision: 'auto',
+        status: 'ok',
+        durationMs: 200,
+      },
+    ]);
+    expect(ng.mcpCalls).toHaveBeenCalledWith({ tenantId: `telegram:${OWNER}`, connectorId: c.id, limit: 20 });
+    expect((await call(token, 'DELETE', `/api/connectors/${c.id}`)).status).toBe(204);
+    expect(ng.deleteMcpConnector).toHaveBeenCalledWith(c.id);
+    expect(
+      ((await (await call(token, 'GET', '/api/connectors')).json()) as { connectors: unknown[] }).connectors,
+    ).toEqual([]);
+  });
+
+  it('the home screen counts a connector whose key was rejected', async () => {
+    const { token } = await login(OWNER);
+    const c = await addGithub(token);
+    await call(token, 'PUT', `/api/connectors/${c.id}/key`, { value: PAT });
+    const { markKeyRejected } = await import('../mcp-connectors.js');
+    await markKeyRejected(c.id);
+    const home = (await (await call(token, 'GET', '/api/home')).json()) as { attention: { connectorIssues: number } };
+    expect(home.attention.connectorIssues).toBe(1);
+    const view = (await (await call(token, 'GET', '/api/connectors')).json()) as { connectors: Conn[] };
+    expect(view.connectors[0]).toMatchObject({ status: 'key_rejected', key: { set: true, status: 'rejected' } });
   });
 });
 

@@ -11,17 +11,50 @@ import { socks5Connect } from './socks5.js';
 import { type Auth, authenticate, revalidate } from './tokens.js';
 
 const BUILTIN_DENY = [
-  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',
-  '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24', '192.168.0.0/16', '198.18.0.0/15',
-  '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4', '255.255.255.255/32',
-  '::/128', '::1/128', '::/96', 'fc00::/7', 'fe80::/10', 'ff00::/8', '64:ff9b::/96', '2001:db8::/32', '2002::/16', '2001::/32',
+  '0.0.0.0/8',
+  '10.0.0.0/8',
+  '100.64.0.0/10',
+  '127.0.0.0/8',
+  '169.254.0.0/16',
+  '172.16.0.0/12',
+  '192.0.0.0/24',
+  '192.0.2.0/24',
+  '192.88.99.0/24',
+  '192.168.0.0/16',
+  '198.18.0.0/15',
+  '198.51.100.0/24',
+  '203.0.113.0/24',
+  '224.0.0.0/4',
+  '240.0.0.0/4',
+  '255.255.255.255/32',
+  '::/128',
+  '::1/128',
+  '::/96',
+  'fc00::/7',
+  'fe80::/10',
+  'ff00::/8',
+  '64:ff9b::/96',
+  '2001:db8::/32',
+  '2002::/16',
+  '2001::/32',
   // SIIT IPv4-translated (::ffff:0:a.b.c.d; distinct from IPv4-mapped, which parseIp already folds to IPv4),
   // local-use NAT64 and the IPv6 discard prefix.
-  '::ffff:0:0:0/96', '64:ff9b:1::/48', '100::/64',
+  '::ffff:0:0:0/96',
+  '64:ff9b:1::/48',
+  '100::/64',
 ];
 
 /** Never reachable by anyone, not even through a connector route that covers them (tailnet IP destinations). */
-const ALWAYS_DENY = ['0.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '224.0.0.0/4', '::/128', '::1/128', 'fe80::/10', 'ff00::/8'];
+const ALWAYS_DENY = [
+  '0.0.0.0/8',
+  '127.0.0.0/8',
+  '169.254.0.0/16',
+  '224.0.0.0/4',
+  '::/128',
+  '::1/128',
+  'fe80::/10',
+  'ff00::/8',
+];
 
 /** Normalise a CIDR string so config.disableBuiltinDeny can be compared textually. */
 export function buildDenySets(cfg: Config): { denySet: CidrSet; hardDenySet: CidrSet } {
@@ -74,6 +107,24 @@ function isModelHost(cfg: Config, host: string): boolean {
   return cfg.modelHosts.some((m) => host === m || host.endsWith(`.${m}`));
 }
 
+/**
+ * Resolve a public hostname and vet every answer against the deny set (a single bad answer rejects the lot).
+ * Returns the validated addresses, IPv4 first, for the caller to pin. Shared by the CONNECT proxy and the MCP upstream client.
+ */
+export async function checkPublicAddresses(ctx: Ctx, host: string, tenantId = ''): Promise<{ ips: string[] } | Deny> {
+  const r = await resolveLimited(ctx, tenantId, host);
+  if ('deny' in r) return r;
+  if (r.length === 0) return d(502, 'dns_failed');
+  const ips: { address: string; v: 4 | 6 }[] = [];
+  for (const x of r) {
+    const ip = parseIp(x.address);
+    if (!ip || ctx.denySet.matches(ip)) return d(403, 'denied_address');
+    if (!ips.some((i) => i.address === x.address)) ips.push({ address: x.address, v: ip.v });
+  }
+  ips.sort((x, y) => x.v - y.v);
+  return { ips: ips.map((i) => i.address) };
+}
+
 /** Decide where (and whether) a tenant's connection to host:port goes. Resolves DNS once and pins the IP. */
 export async function planRoute(ctx: Ctx, tenantId: string, policy: TenantPolicy, a: Authority): Promise<Plan | Deny> {
   const { host, port, isIp } = a;
@@ -99,26 +150,18 @@ export async function planRoute(ctx: Ctx, tenantId: string, policy: TenantPolicy
   }
 
   if (!eg.ports.includes(port)) return d(403, 'port_denied');
-  const r = await resolveLimited(ctx, tenantId, host);
+  const r = await checkPublicAddresses(ctx, host, tenantId);
   if ('deny' in r) return r;
-  const addrs = r;
-  if (addrs.length === 0) return d(502, 'dns_failed');
-  // Every answer must pass before any is tried (a single bad answer rejects the lot); IPv4 first, then IPv6.
-  const ips: { address: string; v: 4 | 6 }[] = [];
-  for (const x of addrs) {
-    const ip = parseIp(x.address);
-    if (!ip || ctx.denySet.matches(ip)) return d(403, 'denied_address');
-    if (!ips.some((i) => i.address === x.address)) ips.push({ address: x.address, v: ip.v });
-  }
-  ips.sort((x, y) => x.v - y.v);
-  const pinned = ips[0]!.address;
+  const ips = r.ips;
+  const pinned = ips[0]!;
   if (eg.route === 'connector') {
     const owner = eg.connectorTenant ?? tenantId;
     const c = getConnector(ctx.db, owner);
-    if (c && c.status === 'up' && c.exitNode) return { kind: 'socks', socksAddr: c.socksAddr, owner, host: pinned, port };
+    if (c && c.status === 'up' && c.exitNode)
+      return { kind: 'socks', socksAddr: c.socksAddr, owner, host: pinned, port };
     if (!eg.fallbackDirect) return d(502, 'connector_down');
   }
-  return { kind: 'direct', ips: ips.map((i) => i.address), port };
+  return { kind: 'direct', ips, port };
 }
 
 /**
@@ -157,7 +200,8 @@ async function resolveLimited(ctx: Ctx, tenantId: string, host: string): Promise
   const lim = ctx.config.connectLimits;
   const q = ctx.dns;
   const queue = q.queues.get(tenantId);
-  const mustWait = q.global >= lim.dnsGlobal || (q.perTenant.get(tenantId) ?? 0) >= lim.dnsPerTenant || (queue?.length ?? 0) > 0;
+  const mustWait =
+    q.global >= lim.dnsGlobal || (q.perTenant.get(tenantId) ?? 0) >= lim.dnsPerTenant || (queue?.length ?? 0) > 0;
   if (mustWait) {
     if ((queue?.length ?? 0) >= lim.dnsQueuePerTenant) return d(429, 'too_many_dns');
     if (q.queued >= lim.dnsQueueGlobal) return d(503, 'dns_busy');
@@ -183,8 +227,14 @@ async function resolveLimited(ctx: Ctx, tenantId: string, host: string): Promise
           dnsPump(ctx);
         };
         (async () => ctx.resolve(host))().then(
-          (r) => { release(); finish(r); },
-          () => { release(); finish(d(502, 'dns_failed')); },
+          (r) => {
+            release();
+            finish(r);
+          },
+          () => {
+            release();
+            finish(d(502, 'dns_failed'));
+          },
         );
       },
     };
@@ -231,7 +281,8 @@ function dialOne(ip: string, port: number, timeoutMs: number, signal: AbortSigna
 
 /** Direct dials try every validated address in turn (IPv4 first), each with its own connect timeout. */
 async function dial(ctx: Ctx, plan: Plan, signal: AbortSignal): Promise<net.Socket> {
-  if (plan.kind === 'socks') return socks5Connect(plan.socksAddr, { host: plan.host, port: plan.port }, ctx.config.socksTimeoutMs, signal);
+  if (plan.kind === 'socks')
+    return socks5Connect(plan.socksAddr, { host: plan.host, port: plan.port }, ctx.config.socksTimeoutMs, signal);
   let last: Error = new Error('no address');
   for (const ip of plan.ips) {
     if (signal.aborted) throw new Error('aborted');
@@ -355,7 +406,9 @@ async function open(ctx: Ctx, auth0: Auth, a: Authority, sock: Duplex): Promise<
   }
   const ac = new AbortController();
   const entry: LiveEntry = {
-    tenantId: auth0.tenant.id, tokenHash: auth0.tokenHash, kind: 'tunnel',
+    tenantId: auth0.tenant.id,
+    tokenHash: auth0.tokenHash,
+    kind: 'tunnel',
     destroy: () => {
       ac.abort();
       sock.destroy();
@@ -376,7 +429,9 @@ async function open(ctx: Ctx, auth0: Auth, a: Authority, sock: Duplex): Promise<
     }
     const v = revalidate(ctx.db, auth0);
     if (!v.ok) {
-      return v.reason === 'paused' ? bail(403, 'tenant_paused') : bail(407, 'auth_required', { 'proxy-authenticate': 'Basic realm="nanogate"' });
+      return v.reason === 'paused'
+        ? bail(403, 'tenant_paused')
+        : bail(407, 'auth_required', { 'proxy-authenticate': 'Basic realm="nanogate"' });
     }
     if (plan.kind === 'socks') {
       entry.via = 'connector';
@@ -413,7 +468,8 @@ export function createConnectServer(ctx: Ctx): http.Server {
       } catch {
         return reply(sock, 400, 'bad_url');
       }
-      if (url.username || url.password || req.headers['transfer-encoding']) return reply(sock, url.username ? 400 : 501, 'unsupported');
+      if (url.username || url.password || req.headers['transfer-encoding'])
+        return reply(sock, url.username ? 400 : 501, 'unsupported');
       const a = parseAuthority(url.host, 80);
       if (!a) return reply(sock, 400, 'bad_authority');
       const o = await open(ctx, auth, a, sock);

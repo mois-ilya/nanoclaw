@@ -30,6 +30,8 @@ import {
   upsertJob,
   type Tenant,
 } from './store.js';
+import { deleteUserKey } from './groq-key.js';
+import { deleteConnectorsOfUser } from './mcp-connectors.js';
 import { forgetGroupTenant, pushTenant } from './tenants.js';
 import { pauseAllTasks, resumeAllTasks } from './tasks.js';
 import { invalidateBudget } from './budget.js';
@@ -176,6 +178,15 @@ async function deleteFriendNow(tgId: number, actor: string): Promise<void> {
       log.warn(`nc: delete step failed: ${name}`, { tgId, err });
     }
   };
+  // MCP connectors: the copies at nanogate (their secrets go with the tenant's below) and the host rows.
+  await step('mcp-connectors', async () => {
+    for (const id of await deleteConnectorsOfUser(t.user_id)) {
+      await nanogateAdmin
+        .deleteMcpConnector(id)
+        .catch((err) => log.warn('nc: connector removal failed', { tgId, err }));
+    }
+  });
+  await step('groq-key', async () => deleteUserKey(t.user_id));
   // Secrets and connector state at nanogate.
   await step('secrets', async () => {
     for (const s of await nanogateAdmin.listSecrets(gateIdOf(t))) await nanogateAdmin.deleteSecret(gateIdOf(t), s.name);

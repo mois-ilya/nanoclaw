@@ -13,6 +13,7 @@
  */
 import {
   mcpServerPluginOwner,
+  notifyConfigChanged,
   parseMcpServerConfig,
   validateMcpServerName,
   type McpServerConfig,
@@ -152,6 +153,8 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
   }
   servers[name] = serverConfig;
   await updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
+  // The initiating session is restarted below; the group's other running sessions keep the old container.json until swept.
+  notifyConfigChanged(agentGroup.id, 'mcp server added');
 
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

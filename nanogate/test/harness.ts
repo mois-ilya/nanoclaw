@@ -45,7 +45,21 @@ export async function fakeUpstream() {
       }
       if (mode === 'json' || mode === 'slow') {
         res.writeHead(200, { 'content-type': 'application/json' });
-        return void setTimeout(() => res.end(JSON.stringify({ id: 'msg_2', usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 4, cache_read_input_tokens: 0 } })), mode === 'slow' ? 150 : 0);
+        return void setTimeout(
+          () =>
+            res.end(
+              JSON.stringify({
+                id: 'msg_2',
+                usage: {
+                  input_tokens: 10,
+                  output_tokens: 20,
+                  cache_creation_input_tokens: 4,
+                  cache_read_input_tokens: 0,
+                },
+              }),
+            ),
+          mode === 'slow' ? 150 : 0,
+        );
       }
       if (mode === 'abort') {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -64,7 +78,16 @@ export async function fakeUpstream() {
     });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  return { server, seen, port: (server.address() as net.AddressInfo).port, close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }) };
+  return {
+    server,
+    seen,
+    port: (server.address() as net.AddressInfo).port,
+    close: () =>
+      new Promise<void>((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
 }
 
 export async function makeGate(over: Record<string, unknown> = {}, resolver?: Resolver, opts: NanogateOptions = {}) {
@@ -78,22 +101,41 @@ export async function makeGate(over: Record<string, unknown> = {}, resolver?: Re
     stateDir: path.join(dir, 'state'),
     upstream: `http://127.0.0.1:${up.port}`,
     prices: PRICES,
-    listen: { bind: '127.0.0.1', anthropicPort: 0, connectPort: 0, hostPort: 0, adminSocket: path.join(dir, 'a.sock') },
+    listen: {
+      bind: '127.0.0.1',
+      anthropicPort: 0,
+      connectPort: 0,
+      hostPort: 0,
+      mcpPort: 0,
+      adminSocket: path.join(dir, 'a.sock'),
+    },
     ...over,
   });
-  const gate: Nanogate = await startNanogate(config, { log: () => undefined, ...(resolver ? { resolver } : {}), ...opts });
+  const gate: Nanogate = await startNanogate(config, {
+    log: () => undefined,
+    ...(resolver ? { resolver } : {}),
+    ...opts,
+  });
 
   const admin = (method: string, p: string, body?: unknown) =>
     new Promise<{ status: number; json: any; raw: string }>((resolve, reject) => {
       const data = body === undefined ? undefined : JSON.stringify(body);
-      const r = http.request({ socketPath: gate.adminSocket, method, path: p, headers: data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {} }, (res) => {
-        const cs: Buffer[] = [];
-        res.on('data', (c) => cs.push(c));
-        res.on('end', () => {
-          const raw = Buffer.concat(cs).toString();
-          resolve({ status: res.statusCode!, raw, json: raw ? JSON.parse(raw) : null });
-        });
-      });
+      const r = http.request(
+        {
+          socketPath: gate.adminSocket,
+          method,
+          path: p,
+          headers: data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {},
+        },
+        (res) => {
+          const cs: Buffer[] = [];
+          res.on('data', (c) => cs.push(c));
+          res.on('end', () => {
+            const raw = Buffer.concat(cs).toString();
+            resolve({ status: res.statusCode!, raw, json: raw ? JSON.parse(raw) : null });
+          });
+        },
+      );
       r.on('error', reject);
       r.end(data);
     });
@@ -107,17 +149,36 @@ export async function makeGate(over: Record<string, unknown> = {}, resolver?: Re
     egress: { route: 'direct', ports: [443] },
   };
   const tenant = async (id: string, over: Record<string, unknown> = {}, policy: Record<string, unknown> = {}) => {
-    const r = await admin('PUT', `/tenants/${id}`, { kind: 'friend', policy: { ...defaultPolicy, ...policy }, budgetLimitMicros: null, periodTz: 'UTC', ...over });
+    const r = await admin('PUT', `/tenants/${id}`, {
+      kind: 'friend',
+      policy: { ...defaultPolicy, ...policy },
+      budgetLimitMicros: null,
+      periodTz: 'UTC',
+      ...over,
+    });
     if (r.status !== 200) throw new Error(`tenant: ${r.raw}`);
   };
   const session = async (tenantId: string, sessionKey = `s-${tenantId}`) =>
-    (await admin('POST', '/sessions/ensure', { tenantId, sessionKey, runtimeIdentity: 'rt', disposition: 'create' })).json.token as string;
+    (await admin('POST', '/sessions/ensure', { tenantId, sessionKey, runtimeIdentity: 'rt', disposition: 'create' }))
+      .json.token as string;
 
-  const messages = async (token: string, content: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, port = gate.ports.anthropic, p = '/anthropic/v1/messages') => {
+  const messages = async (
+    token: string,
+    content: string,
+    extra: Record<string, unknown> = {},
+    headers: Record<string, string> = {},
+    port = gate.ports.anthropic,
+    p = '/anthropic/v1/messages',
+  ) => {
     try {
       const res = await fetch(`http://127.0.0.1:${port}${p}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': token, 'anthropic-version': '2023-06-01', ...headers },
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': token,
+          'anthropic-version': '2023-06-01',
+          ...headers,
+        },
         body: JSON.stringify({ model: 'm-1', max_tokens: 100, messages: [{ role: 'user', content }], ...extra }),
       });
       const text = await res.text().catch(() => '[aborted]');
@@ -129,7 +190,14 @@ export async function makeGate(over: Record<string, unknown> = {}, resolver?: Re
 
   const usageRows = () => gate.ctx.db.prepare('SELECT * FROM usage ORDER BY id').all() as any[];
   return {
-    gate, up, dir, admin, tenant, session, messages, usageRows,
+    gate,
+    up,
+    dir,
+    admin,
+    tenant,
+    session,
+    messages,
+    usageRows,
     async close() {
       await gate.close();
       await up.close();
@@ -149,7 +217,15 @@ export function echoServer(): Promise<{ port: number; close(): void }> {
       c.on('error', () => undefined);
       c.pipe(c);
     });
-    s.listen(0, '127.0.0.1', () => resolve({ port: (s.address() as net.AddressInfo).port, close: () => { socks.forEach((c) => c.destroy()); s.close(); } }));
+    s.listen(0, '127.0.0.1', () =>
+      resolve({
+        port: (s.address() as net.AddressInfo).port,
+        close: () => {
+          socks.forEach((c) => c.destroy());
+          s.close();
+        },
+      }),
+    );
   });
 }
 
@@ -166,9 +242,16 @@ export function fakeSocks(to: { host: string; port: number }) {
         const atyp = d[3]!;
         let host: string;
         let off: number;
-        if (atyp === 1) { host = [...d.subarray(4, 8)].join('.'); off = 8; }
-        else if (atyp === 3) { host = d.subarray(5, 5 + d[4]!).toString(); off = 5 + d[4]!; }
-        else { host = d.subarray(4, 20).toString('hex'); off = 20; }
+        if (atyp === 1) {
+          host = [...d.subarray(4, 8)].join('.');
+          off = 8;
+        } else if (atyp === 3) {
+          host = d.subarray(5, 5 + d[4]!).toString();
+          off = 5 + d[4]!;
+        } else {
+          host = d.subarray(4, 20).toString('hex');
+          off = 20;
+        }
         targets.push({ atyp, host, port: d.readUInt16BE(off) });
         const up = net.connect(to.port, to.host, () => {
           c.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
@@ -181,12 +264,25 @@ export function fakeSocks(to: { host: string; port: number }) {
     });
   });
   return new Promise<{ addr: string; targets: typeof targets; close(): void }>((resolve) =>
-    server.listen(0, '127.0.0.1', () => resolve({ addr: `127.0.0.1:${(server.address() as net.AddressInfo).port}`, targets, close: () => { socks.forEach((c) => c.destroy()); server.close(); } })),
+    server.listen(0, '127.0.0.1', () =>
+      resolve({
+        addr: `127.0.0.1:${(server.address() as net.AddressInfo).port}`,
+        targets,
+        close: () => {
+          socks.forEach((c) => c.destroy());
+          server.close();
+        },
+      }),
+    ),
   );
 }
 
 /** Raw CONNECT; resolves with the status line, headers and the (open) socket. */
-export function proxyConnect(port: number, authority: string, auth?: string): Promise<{ status: number; reason: string | undefined; socket: net.Socket; rest: Buffer }> {
+export function proxyConnect(
+  port: number,
+  authority: string,
+  auth?: string,
+): Promise<{ status: number; reason: string | undefined; socket: net.Socket; rest: Buffer }> {
   return new Promise((resolve, reject) => {
     const s = net.connect(port, '127.0.0.1');
     let buf = Buffer.alloc(0);
@@ -200,7 +296,9 @@ export function proxyConnect(port: number, authority: string, auth?: string): Pr
       const reason = /x-nanogate-reason: (\S+)/i.exec(head)?.[1];
       resolve({ status: Number(/^HTTP\/1\.1 (\d+)/.exec(head)![1]), reason, socket: s, rest: buf.subarray(i + 4) });
     });
-    s.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`);
+    s.write(
+      `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`,
+    );
   });
 }
 
@@ -223,20 +321,41 @@ export function rawConnect(port: number, authority: string, auth?: string) {
   let buf = '';
   socket.on('data', (d) => (buf += d.toString()));
   const closed = new Promise<string>((resolve) => socket.on('close', () => resolve(buf)));
-  socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`);
-  return { socket, closed, status: () => Number(/^HTTP\/1\.1 (\d+)/.exec(buf)?.[1] ?? 0), reason: () => /x-nanogate-reason: (\S+)/i.exec(buf)?.[1] };
+  socket.write(
+    `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`,
+  );
+  return {
+    socket,
+    closed,
+    status: () => Number(/^HTTP\/1\.1 (\d+)/.exec(buf)?.[1] ?? 0),
+    reason: () => /x-nanogate-reason: (\S+)/i.exec(buf)?.[1],
+  };
 }
 
 /** POST that lets the test control body timing. Resolves with the response, or status 0 if the socket dies. */
-export function slowPost(port: number, token: string, headers: Record<string, string | number> = {}, path = '/anthropic/v1/messages') {
+export function slowPost(
+  port: number,
+  token: string,
+  headers: Record<string, string | number> = {},
+  path = '/anthropic/v1/messages',
+) {
   let resolveRes!: (v: { status: number; text: string }) => void;
   const result = new Promise<{ status: number; text: string }>((r) => (resolveRes = r));
-  const req = http.request({ host: '127.0.0.1', port, method: 'POST', path, headers: { 'x-api-key': token, 'content-type': 'application/json', ...headers } }, (res) => {
-    const cs: Buffer[] = [];
-    res.on('data', (c) => cs.push(c));
-    res.on('end', () => resolveRes({ status: res.statusCode!, text: Buffer.concat(cs).toString() }));
-    res.on('error', () => resolveRes({ status: 0, text: '' }));
-  });
+  const req = http.request(
+    {
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path,
+      headers: { 'x-api-key': token, 'content-type': 'application/json', ...headers },
+    },
+    (res) => {
+      const cs: Buffer[] = [];
+      res.on('data', (c) => cs.push(c));
+      res.on('end', () => resolveRes({ status: res.statusCode!, text: Buffer.concat(cs).toString() }));
+      res.on('error', () => resolveRes({ status: 0, text: '' }));
+    },
+  );
   req.on('error', () => resolveRes({ status: 0, text: '' }));
   return { req, result };
 }

@@ -13,7 +13,12 @@ import { AnchoredDir } from '../../anchored-dir.js';
 import { GROUPS_DIR } from '../../config.js';
 import { getDb } from '../../db/connection.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
+import {
+  ensureContainerConfig,
+  getContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../../db/container-configs.js';
 import { getSession, getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { isContainerRunning } from '../../container-runner.js';
 import { parseSkillSelection } from '../../container-config.js';
@@ -22,15 +27,19 @@ import { nanogateAdmin, type BudgetSnapshot } from '../../gateway-providers/nano
 import { dmSession, injectChat } from '../chat.js';
 import { activeTurnInChat } from '../port.js';
 import { invalidateBudget } from '../budget.js';
+import { markGroupConfigDirty } from '../config-apply.js';
 import { approveRequest, denyRequest } from '../decisions.js';
 import {
   GROQ_KEY_RE,
   anyGroqKeyInvalid,
-  miniappKeyDir,
+  deleteUserKey,
+  groqKeyCandidates,
   miniappKeyPath,
   resetGroqKeyState,
   resolveGroqKey,
   usableGroqKey,
+  userKeyPath,
+  writeKeyFile,
 } from '../groq-key.js';
 import { nc, ownerTgId, presetConfig, tgIdOfUserId, USD, userIdOf, type Preset } from '../config.js';
 import { ownerConnectorConfigured, ownerConnectorStatus, syncOwnerConnector } from '../connector.js';
@@ -47,6 +56,8 @@ import {
 import { collectSystem } from '../health.js';
 import { previewGuestAnswer } from '../guest.js';
 import { deleteFriend, LifecycleError, pauseFriend, resumeFriend } from '../lifecycle.js';
+import { connectorIssueCount } from '../mcp-connectors.js';
+import { FRIEND_SKILLS } from '../provision.js';
 import {
   audit,
   gateIdOf,
@@ -68,6 +79,7 @@ import { validTz } from '../settings.js';
 import { deleteTask, getTaskDetail, listTasks, pauseTask, rearmRecurring, resumeTask, taskName } from '../tasks.js';
 import { pushTenant } from '../tenants.js';
 import { ApiError, bad, conflict, forbidden, notFound } from './errors.js';
+import { connectorRoutes } from './connectors-api.js';
 import { listBounded, parseRelPath, readBoundedPath, readBounded, UnsafePathError } from './readbounded.js';
 import type {
   AccessRequest,
@@ -293,7 +305,9 @@ const home: Handler = async ({ tenant, isOwner }) => {
     view.attention = {
       pendingRequests: (await listPendingRequests()).length,
       friendsOverBudget: over,
-      connectorIssues: ownerConnectorConfigured() && (await ownerConnectorStatus()) !== 'ok' ? 1 : 0,
+      connectorIssues:
+        (ownerConnectorConfigured() && (await ownerConnectorStatus()) !== 'ok' ? 1 : 0) +
+        (await connectorIssueCount(tenant.user_id)),
     };
   }
   return ok(view);
@@ -494,32 +508,64 @@ const SKILL_RU: Record<string, { name: string; description: string }> = {
 };
 const HIDDEN_SKILLS = new Set(['self-customize', 'welcome']);
 
-const skills: Handler = async ({ tenant }) => {
-  if (!tenant.agent_group_id) throw conflict('Пространство ещё не готово');
-  const row = await getContainerConfig(tenant.agent_group_id);
-  const selection = parseSkillSelection(row?.skills, tenant.name);
-  const dir = path.join(process.cwd(), 'container', 'skills');
-  let names: string[] = [];
+/** Every skill folder under container/skills/ (hidden ones included): the universe a selection is expanded against. */
+function skillFolders(): string[] {
   try {
-    names = fs
-      .readdirSync(dir, { withFileTypes: true })
+    return fs
+      .readdirSync(path.join(process.cwd(), 'container', 'skills'), { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .sort();
   } catch {
-    /* no skills dir */
+    return []; // no skills dir
   }
-  // Only what this user really has: a skill that is switched off (or owner-only) is not an ability.
-  const out: Skill[] = names
-    .filter((id) => !HIDDEN_SKILLS.has(id) && (selection === 'all' || selection.includes(id)))
-    .map((id) => ({
-      id,
-      name: SKILL_RU[id]?.name ?? id,
-      description: SKILL_RU[id]?.description ?? frontmatterDescription(path.join(dir, id, 'SKILL.md')),
-      enabled: true,
-      locked: false,
-    }));
-  return ok(out);
+}
+
+/** What the user can see and switch: everything not hidden. A friend may switch only FRIEND_SKILLS; the rest is locked and off. */
+async function skillList(tenant: Tenant, isOwner: boolean): Promise<Skill[]> {
+  const row = await getContainerConfig(groupOf(tenant));
+  const selection = parseSkillSelection(row?.skills, tenant.name);
+  const dir = path.join(process.cwd(), 'container', 'skills');
+  return skillFolders()
+    .filter((id) => !HIDDEN_SKILLS.has(id))
+    .map((id) => {
+      const locked = !isOwner && !FRIEND_SKILLS.includes(id);
+      return {
+        id,
+        name: SKILL_RU[id]?.name ?? id,
+        description: SKILL_RU[id]?.description ?? frontmatterDescription(path.join(dir, id, 'SKILL.md')),
+        enabled: !locked && (selection === 'all' || selection.includes(id)),
+        locked,
+      };
+    });
+}
+
+const skills: Handler = async ({ tenant, isOwner }) => ok(await skillList(tenant, isOwner));
+
+const SKILL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The real switch: stored in `container_configs.skills`, applied to new and idle conversations (spawn re-links skills). */
+const skillPut: Handler = async (c) => {
+  const { tenant, isOwner, body } = c;
+  const id = decodeURIComponent(c.m[1] ?? '');
+  if (typeof body.enabled !== 'boolean') throw bad('enabled');
+  const group = groupOf(tenant);
+  if (!SKILL_ID.test(id) || HIDDEN_SKILLS.has(id) || !skillFolders().includes(id)) throw notFound('Навык не найден');
+  if (!isOwner && !FRIEND_SKILLS.includes(id)) throw forbidden('Этот навык недоступен');
+  await ensureContainerConfig(group);
+  const row = await getContainerConfig(group);
+  const selection = parseSkillSelection(row?.skills, tenant.name);
+  // 'all' is expanded into the explicit list (hidden skills included) before one of them is taken out.
+  const list = selection === 'all' ? skillFolders() : [...selection];
+  const has = list.includes(id);
+  if (body.enabled && !has) list.push(id);
+  if (!body.enabled && has) list.splice(list.indexOf(id), 1);
+  if (body.enabled !== has) {
+    await updateContainerConfigJson(group, 'skills', list);
+    await markGroupConfigDirty(group, 'skill toggled');
+    await audit(tenant.user_id, 'skill_toggle', id, { enabled: body.enabled });
+  }
+  return ok(await skillList(tenant, isOwner));
 };
 
 // ---------- tasks ----------
@@ -716,24 +762,42 @@ const connections: Handler = async ({ tenant, isOwner }) => {
   return ok({
     connections: [conn],
     egress: await egressView(tenant, isOwner),
-    ...(isOwner ? { stt: sttView() } : {}),
+    stt: sttView(tenant, isOwner),
   });
 };
 
-/** Which transcriber is live. Never the key. */
-function sttView(): {
+/** What the Mini App shows about voice recognition (extends the owner's view with the caller's own key). */
+export interface SttView {
   provider: 'groq' | 'local' | 'none';
-  groqKey: { source: 'miniapp' | 'server'; savedAt?: string } | null;
+  groqKey: { source: 'own' | 'miniapp' | 'server'; savedAt?: string } | null;
   groqKeyInvalid?: boolean;
-} {
-  const usable = usableGroqKey();
-  const k = usable ?? resolveGroqKey();
-  const invalid = anyGroqKeyInvalid();
+  mine: { own: boolean; sharedAvailable: boolean };
+}
+
+/**
+ * Which transcriber is live for THIS caller. Never the key. The owner sees the shared key (his Mini App key, else the
+ * server's) as before; a friend sees only his own key and whether a shared one covers him, never its details.
+ */
+function sttView(t: Tenant, isOwner: boolean): SttView {
+  const own = groqKeyCandidates(t.user_id).find((k) => k.source === 'own');
+  const shared = groqKeyCandidates();
+  const usable = usableGroqKey(t.user_id);
   const provider = usable ? 'groq' : nc.sttUrl() ? 'local' : 'none';
+  const mine = { own: !!own, sharedAvailable: shared.length > 0 };
+  if (isOwner) {
+    const k = resolveGroqKey();
+    return {
+      provider,
+      groqKey: k ? { source: k.source, ...(k.savedAt ? { savedAt: k.savedAt } : {}) } : null,
+      ...(anyGroqKeyInvalid() ? { groqKeyInvalid: true } : {}),
+      mine,
+    };
+  }
   return {
     provider,
-    groqKey: k ? { source: k.source, ...(k.savedAt ? { savedAt: k.savedAt } : {}) } : null,
-    ...(invalid ? { groqKeyInvalid: true } : {}),
+    groqKey: own ? { source: 'own', ...(own.savedAt ? { savedAt: own.savedAt } : {}) } : null,
+    ...(own && anyGroqKeyInvalid(t.user_id) ? { groqKeyInvalid: true } : {}),
+    mine,
   };
 }
 
@@ -747,9 +811,8 @@ const tsReconnect: Handler = async ({ tenant, isOwner }) => {
 
 // ---------- Groq key (owner only, write-only; host-only file, never under groups/) ----------
 
-const groqKeyPut: Handler = async ({ tenant, body }) => {
-  const key = typeof body.key === 'string' ? body.key.trim() : '';
-  if (!GROQ_KEY_RE.test(key)) throw bad('Это не похоже на ключ Groq (gsk_…)');
+/** Reject a key Groq says no to (401/403); network trouble or a timeout is not a reason to refuse it. */
+async function verifyGroqKey(key: string): Promise<void> {
   try {
     const res = await fetch('https://api.groq.com/openai/v1/models', {
       headers: { authorization: `Bearer ${key}` },
@@ -757,20 +820,15 @@ const groqKeyPut: Handler = async ({ tenant, body }) => {
     });
     if (res.status === 401 || res.status === 403) throw bad('Ключ не подошёл');
   } catch (err) {
-    if (err instanceof ApiError) throw err; // network trouble or timeout: save anyway
+    if (err instanceof ApiError) throw err;
   }
-  const dir = miniappKeyDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
-  const file = miniappKeyPath();
-  const tmp = `${file}.${process.pid}.tmp`;
-  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600);
-  try {
-    fs.writeSync(fd, `${key}\n`);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.renameSync(tmp, file);
+}
+
+const groqKeyPut: Handler = async ({ tenant, body }) => {
+  const key = typeof body.key === 'string' ? body.key.trim() : '';
+  if (!GROQ_KEY_RE.test(key)) throw bad('Это не похоже на ключ Groq (gsk_…)');
+  await verifyGroqKey(key);
+  writeKeyFile(miniappKeyPath(), key);
   resetGroqKeyState();
   await audit(tenant.user_id, 'groq_key_saved', tenant.user_id); // never the value
   return noContent;
@@ -781,6 +839,24 @@ const groqKeyDelete: Handler = async ({ tenant }) => {
   resetGroqKeyState();
   await audit(tenant.user_id, 'groq_key_removed', tenant.user_id);
   return noContent;
+};
+
+// The caller's OWN key (every tenant, owner included): it serves only his voice messages.
+const ownGroqKeyPut: Handler = async ({ tenant, isOwner, body }) => {
+  const key = typeof body.value === 'string' ? body.value.trim() : '';
+  if (!GROQ_KEY_RE.test(key)) throw bad('Это не похоже на ключ Groq (gsk_…)');
+  await verifyGroqKey(key);
+  writeKeyFile(userKeyPath(tenant.user_id), key);
+  resetGroqKeyState();
+  await audit(tenant.user_id, 'groq_own_key_saved', tenant.user_id);
+  return ok(sttView(tenant, isOwner));
+};
+
+const ownGroqKeyDelete: Handler = async ({ tenant, isOwner }) => {
+  deleteUserKey(tenant.user_id);
+  resetGroqKeyState();
+  await audit(tenant.user_id, 'groq_own_key_removed', tenant.user_id);
+  return ok(sttView(tenant, isOwner));
 };
 
 const egressPut: Handler = async ({ tenant, isOwner, body }) => {
@@ -1065,6 +1141,7 @@ export const routes: Route[] = [
   { method: 'GET', re: /^\/api\/memory\/file$/, handler: memoryFile },
   { method: 'POST', re: /^\/api\/memory\/forget$/, handler: memoryForget },
   { method: 'GET', re: /^\/api\/skills$/, handler: skills },
+  { method: 'PUT', re: new RegExp(`^/api/skills/${seg}$`), handler: skillPut },
   { method: 'GET', re: /^\/api\/tasks$/, handler: tasksList },
   { method: 'GET', re: new RegExp(`^/api/tasks/${seg}$`), handler: taskGet },
   { method: 'POST', re: new RegExp(`^/api/tasks/${seg}/pause$`), handler: taskVerb('pause') },
@@ -1075,6 +1152,8 @@ export const routes: Route[] = [
   { method: 'POST', re: /^\/api\/connections\/tailscale\/reconnect$/, handler: tsReconnect },
   { method: 'PUT', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyPut, owner: true },
   { method: 'DELETE', re: /^\/api\/owner\/secrets\/groq-key$/, handler: groqKeyDelete, owner: true },
+  { method: 'PUT', re: /^\/api\/secrets\/groq-key$/, handler: ownGroqKeyPut },
+  { method: 'DELETE', re: /^\/api\/secrets\/groq-key$/, handler: ownGroqKeyDelete },
   { method: 'PUT', re: /^\/api\/egress$/, handler: egressPut },
   { method: 'GET', re: /^\/api\/settings$/, handler: settingsGet },
   { method: 'PATCH', re: /^\/api\/settings$/, handler: settingsPatch },
@@ -1092,4 +1171,5 @@ export const routes: Route[] = [
   { method: 'POST', re: /^\/api\/owner\/guest\/preview$/, handler: ownerGuestPreview, owner: true },
   { method: 'POST', re: /^\/api\/owner\/guest\/enabled$/, handler: ownerGuestEnabled, owner: true },
   { method: 'GET', re: /^\/api\/owner\/system$/, handler: ownerSystem, owner: true },
+  ...connectorRoutes,
 ];

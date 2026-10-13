@@ -23,6 +23,7 @@ import {
   runMigrations,
 } from '../../db/index.js';
 import { updateContainerConfigJson } from '../../db/container-configs.js';
+import { setConfigChangedListener } from '../../container-config.js';
 import { applyAddMcpServer } from './apply.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-self-mod-apply';
@@ -54,6 +55,20 @@ describe('applyAddMcpServer', () => {
     expect(JSON.parse((await getContainerConfig('ag-1'))!.mcp_servers)).toEqual({
       remote: { type: 'http', url: 'https://mcp.example.com/mcp' },
     });
+  });
+
+  it('tells the product layer the group config changed (other running sessions need sweeping)', async () => {
+    const listener = vi.fn();
+    setConfigChangedListener(listener);
+    try {
+      await applyAddMcpServer({ name: 'remote', type: 'http', url: 'https://mcp.example.com/mcp' }, session);
+      expect(listener).toHaveBeenCalledWith('ag-1', 'mcp server added');
+      listener.mockClear();
+      await applyAddMcpServer({ name: 'bad', type: 'http', url: 'http://insecure.example.com' }, session);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      setConfigChangedListener(null);
+    }
   });
 
   it('refuses to overwrite a plugin-owned server even after approval', async () => {

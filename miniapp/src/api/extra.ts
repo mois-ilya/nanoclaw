@@ -5,18 +5,36 @@ import type { Connection, GuestContext, SystemView, UsageView } from './types';
 /** `GET /api/connections` (owner): the live speech-to-text provider and where the Groq key came from. */
 export interface SttView {
   provider: 'groq' | 'local' | 'none';
-  groqKey: { source: 'miniapp' | 'server'; savedAt?: string } | null;
+  groqKey: { source: 'own' | 'miniapp' | 'server'; savedAt?: string } | null;
   groqKeyInvalid?: boolean;
+  /** The caller's own key (`PUT /api/secrets/groq-key`) and whether a shared one (owner's / server's) covers them otherwise. */
+  mine?: { own: boolean; sharedAvailable: boolean };
 }
-export interface AuditRow { at: string; actor: string; action: string; target?: string }
+export interface AuditRow {
+  at: string;
+  actor: string;
+  action: string;
+  target?: string;
+}
 export interface SystemViewX extends SystemView {
-  buildId?: string; deployedAt?: string; grafanaUrl?: string; recentAudit?: AuditRow[];
+  buildId?: string;
+  deployedAt?: string;
+  grafanaUrl?: string;
+  recentAudit?: AuditRow[];
 }
 /** `managed`: run by the server (the owner's connector) — no key entry, no revoke. */
-export interface ConnectionX extends Connection { managed?: boolean }
+export interface ConnectionX extends Connection {
+  managed?: boolean;
+}
 /** `voiceSeconds`: transcribed voice in the period (free, local whisper). */
-export interface UsageViewX extends UsageView { voiceSeconds?: number }
-export interface GuestContextX extends GuestContext { maxChars?: number }
-export interface GuestPreview { answer: string }
+export interface UsageViewX extends UsageView {
+  voiceSeconds?: number;
+}
+export interface GuestContextX extends GuestContext {
+  maxChars?: number;
+}
+export interface GuestPreview {
+  answer: string;
+}
 
 export const GUEST_MAX_DEFAULT = 8000; // src/nc/guest-store.ts GUEST_MAX_CHARS

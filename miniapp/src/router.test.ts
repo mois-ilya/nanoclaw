@@ -2,11 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootRoute, depthOf, parentOf, parseHash, routeFromStartParam, toHash } from './router';
+import { OWNER_ONLY, bootRoute, depthOf, parentOf, parseHash, routeFromStartParam, toHash } from './router';
 
 describe('router', () => {
   it('parses and formats hashes (round trip)', () => {
-    for (const h of ['#/', '#/memory', '#/memory?dir=people%2Fclose', '#/memory/file?path=people%2Fanya.md', '#/tasks', '#/tasks/t1', '#/friends/77', '#/guest', '#/system']) {
+    for (const h of [
+      '#/',
+      '#/memory',
+      '#/memory?dir=people%2Fclose',
+      '#/memory/file?path=people%2Fanya.md',
+      '#/tasks',
+      '#/tasks/t1',
+      '#/friends/77',
+      '#/guest',
+      '#/system',
+      '#/connectors',
+    ]) {
       expect(toHash(parseHash(h))).toBe(h);
     }
   });
@@ -32,6 +43,11 @@ describe('router', () => {
     expect(routeFromStartParam('requests')).toEqual({ name: 'requests' });
     expect(routeFromStartParam('evil')).toBeNull();
     expect(routeFromStartParam(undefined)).toBeNull();
+  });
+  it('connectors is an owner-only screen with a start param', () => {
+    expect(OWNER_ONLY.has('connectors')).toBe(true);
+    expect(depthOf(parseHash('#/connectors'))).toBe(1);
+    expect(routeFromStartParam('connectors')).toEqual({ name: 'connectors' });
   });
   it('boot route ignores the Telegram launch hash but honours an explicit app route', () => {
     const tgHash = '#tgWebAppData=query_id%3DAA&tgWebAppVersion=8.0&tgWebAppPlatform=ios';

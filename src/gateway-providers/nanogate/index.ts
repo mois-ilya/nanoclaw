@@ -22,6 +22,8 @@ import { looksLikeCredential, type ContainerSpec } from '../../drivers/types.js'
 import {
   gatewayRuntimeIdentity,
   registerGatewayProvider,
+  type GatewayApprovalDecision,
+  type GatewayApprovalRequest,
   type GatewayProviderDefinition,
   type GatewaySessionInput,
   type GatewaySessionLease,
@@ -32,6 +34,7 @@ import {
   NanogateNoSessionTokenError,
   createNanogateAdmin,
   type HostTokenPurpose,
+  type McpPending,
   type NanogateAdmin,
   type TenantKind,
 } from './admin-client.js';
@@ -41,6 +44,8 @@ export * from './admin-client.js';
 export const NANOGATE_KIND = 'nanogate';
 export const RELAY_ROLE = 'relay';
 export const RELAY_ENDPOINT = 'nanorelay';
+/** nanogate's MCP listener; the relay forwards it as `8081=nanogate:8081`. */
+export const MCP_GATEWAY_PORT = 8081;
 const HEALTH_INTERVAL_MS = 10_000;
 /** A health lease older than this reads as unavailable (the probe loop died). */
 const HEALTH_STALE_MS = 35_000;
@@ -166,7 +171,7 @@ function relayContainer(): ContainerSpec {
   return {
     role: RELAY_ROLE,
     image,
-    env: { NANORELAY_MAP: '8080=nanogate:8080,3128=nanogate:3128' },
+    env: { NANORELAY_MAP: `8080=nanogate:8080,3128=nanogate:3128,${MCP_GATEWAY_PORT}=nanogate:${MCP_GATEWAY_PORT}` },
     mounts: [],
     // M8: the relay is a tiny forwarder.
     resources: { memoryMb: 32, cpus: '0.25', pidsLimit: 64 },
@@ -196,6 +201,13 @@ export function agentEnv(token: string): Record<string, string> {
     // WebFetch and Explore subagents call the small model; pin it to one nanogate's default policy allows.
     ANTHROPIC_DEFAULT_HAIKU_MODEL: smallModel(),
     ANTHROPIC_SMALL_FAST_MODEL: smallModel(),
+    // The agent-runner adds the session token as a Bearer header to MCP servers whose URL starts with this.
+    NC_MCP_GATEWAY_PREFIX: `http://${RELAY_ENDPOINT}:${MCP_GATEWAY_PORT}/mcp/`,
+    // A dangerous call is held up to 300 s for a human; the per-server `timeout` (420 s) and these must outlast it.
+    // Both variables exist in the bundled CLI (checked by grep). MCP_TOOL_TIMEOUT is deliberately not set: it is
+    // global and would hit the built-in nanoclaw server too.
+    CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '420000',
+    CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS: '0',
     // Claude Code switches MCP tool search off for a non-first-party base URL unless this is set. Needs
     // `advanced-tool-use-2025-11-20` in nanogate's defaultBetas. Kill switch: NC_TOOL_SEARCH=0.
     ...(enabled('NC_TOOL_SEARCH') ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
@@ -269,6 +281,138 @@ async function ensure(input: GatewaySessionInput, _signal: AbortSignal): Promise
   };
 }
 
+// ---------- MCP approvals ----------
+
+/** Inverse of `gatewayRuntimeIdentity`: 'slug/group/session', or null when it does not parse. */
+export function parseRuntimeIdentity(
+  identity: string,
+): { installSlug: string; agentGroupId: string; sessionId: string } | null {
+  const parts = identity.split('/');
+  if (parts.length !== 3 || parts.some((p) => p === '')) return null;
+  return { installSlug: parts[0], agentGroupId: parts[1], sessionId: parts[2] };
+}
+
+/** Mutable for tests only. */
+export const mcpApprovalTuning = {
+  waitMs: 25_000,
+  retryMs: 2_000,
+  /** A pending call created this much before the subscription started outlived a host restart. */
+  staleSlackMs: 5_000,
+};
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+async function agentLabel(agentGroupId: string): Promise<string> {
+  try {
+    const { getAgentGroup } = await import('../../db/agent-groups.js');
+    return (await getAgentGroup(agentGroupId))?.name ?? agentGroupId;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- a label is cosmetic
+  } catch {
+    return agentGroupId;
+  }
+}
+
+async function toApprovalRequest(
+  p: McpPending,
+  parsed: { agentGroupId: string; sessionId: string },
+): Promise<GatewayApprovalRequest> {
+  return {
+    id: p.id,
+    trigger: 'policy',
+    agentGroupId: parsed.agentGroupId,
+    sessionId: parsed.sessionId,
+    runtimeIdentity: p.sessionKey,
+    createdAt: p.createdAt,
+    expiresAt: p.expiresAt,
+    title: `${p.connectorTitle}: подтвердите действие`,
+    question: `Агент хочет вызвать ${p.tool}`,
+    summary: {
+      agent: await agentLabel(parsed.agentGroupId),
+      action: p.tool,
+      resource: p.connectorTitle,
+      reason: 'инструмент может изменить данные',
+    },
+    displayFields: p.args,
+    audit: { connectorId: p.connectorId, tool: p.tool },
+  };
+}
+
+/**
+ * Long-poll nanogate's held MCP calls and route each to the host's approval coordinator. Runs until
+ * `signal` aborts and NEVER returns on an error: returning while the signal is live closes session admission.
+ */
+async function subscribeMcpApprovals(
+  decide: (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>,
+  signal: AbortSignal,
+  resolved?: (requestId: string) => Promise<void>,
+): Promise<void> {
+  const { INSTALL_SLUG } = await import('../../config.js');
+  const bootAt = Date.now();
+  const known = new Set<string>();
+  const post = (id: string, d: GatewayApprovalDecision) =>
+    adminClient.decideMcpApproval(id, d).catch((err) => log.warn('nanogate: mcp decision not delivered', { id, err }));
+  let since = 0;
+  while (!signal.aborted) {
+    let reply: Awaited<ReturnType<NanogateAdmin['waitMcpApprovals']>>;
+    try {
+      reply = await adminClient.waitMcpApprovals(since, mcpApprovalTuning.waitMs, signal);
+      if (!reply || typeof reply.version !== 'number' || !Array.isArray(reply.pending)) {
+        throw new Error('malformed mcp-approvals reply');
+      }
+      // eslint-disable-next-line no-catch-all/no-catch-all -- every failure (socket, nanogate restart, bad reply) means re-poll
+    } catch (err) {
+      if (signal.aborted) break;
+      log.warn('nanogate: mcp approvals poll failed, retrying', { err });
+      since = 0;
+      await sleep(mcpApprovalTuning.retryMs, signal);
+      continue;
+    }
+    since = reply.version;
+    // A shared nanogate also holds calls of other installs (prod and test): they are not ours to decide.
+    const mine = reply.pending.filter((p) => {
+      const parsed = parseRuntimeIdentity(p.sessionKey);
+      return parsed === null || parsed.installSlug === INSTALL_SLUG;
+    });
+    const live = new Set(mine.map((p) => p.id));
+    for (const id of [...known]) {
+      if (live.has(id)) continue;
+      known.delete(id);
+      void resolved?.(id)?.catch((err) => log.warn('nanogate: mcp approval resolve failed', { id, err }));
+    }
+    for (const p of mine) {
+      if (known.has(p.id)) continue;
+      known.add(p.id);
+      const parsed = parseRuntimeIdentity(p.sessionKey);
+      const created = Date.parse(p.createdAt);
+      if (!parsed || !Number.isFinite(created) || created < bootAt - mcpApprovalTuning.staleSlackMs) {
+        // Held since before this host started: its card is gone with the old process.
+        void post(p.id, 'unavailable');
+        continue;
+      }
+      void toApprovalRequest(p, parsed)
+        .then((req) => decide(req))
+        .then(
+          (d) => post(p.id, d),
+          (err) => {
+            log.warn('nanogate: mcp approval decide failed', { id: p.id, err });
+            return post(p.id, 'unavailable');
+          },
+        );
+    }
+  }
+}
+
 // ---------- startup sweep ----------
 
 /**
@@ -307,12 +451,7 @@ export const nanogateProvider: GatewayProviderDefinition = {
   },
   sessions: { ensure, reapOrphans },
   approvals: {
-    // No approvals in v1: hold the subscription open until the host detaches.
-    subscribe: (_decide, signal) =>
-      new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      }),
+    subscribe: (decide, signal, resolved) => subscribeMcpApprovals(decide, signal, resolved),
   },
 };
 

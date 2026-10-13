@@ -138,6 +138,56 @@ export interface SystemView {
   errors7d: number;
 }
 
+// MCP connectors (Stage 1). Owner-only in the Cabinet; keys are write-only and never come back.
+export interface CatalogItem {
+  id: string;
+  title: string;
+  description: string;
+  keyLabel: string;
+  keyHelp: string;
+  keyUrl: string;
+}
+export interface ConnectorTool {
+  name: string;
+  title?: string;
+  readOnly: boolean;
+  policy: 'ask' | 'auto' | null;
+  asks: boolean;
+}
+export interface Connector {
+  id: string;
+  catalogId: string;
+  title: string;
+  enabled: boolean;
+  readOnly: boolean;
+  key: { set: boolean; savedAt?: string; status: 'ok' | 'rejected' | 'unverified' | null };
+  status: 'ok' | 'no_key' | 'key_rejected' | 'upstream_error' | 'disabled';
+  warning?: string;
+  applying: boolean; // running sessions still hold the old config
+  tools: ConnectorTool[]; // empty until the first probe / tools/list
+}
+export interface ConnectorsView {
+  catalog: CatalogItem[];
+  connectors: Connector[];
+}
+export interface ConnectorCall {
+  at: string;
+  tool: string;
+  dangerous: boolean;
+  decision:
+    | 'auto'
+    | 'approved'
+    | 'denied'
+    | 'expired'
+    | 'unavailable'
+    | 'disconnected'
+    | 'revoked'
+    | 'disabled'
+    | 'pending';
+  status: 'ok' | 'tool_error' | 'upstream_error' | 'unknown' | null;
+  durationMs?: number;
+}
+
 // Session / errors (see "Auth flow" in the contract)
 export interface SessionResponse {
   token: string;

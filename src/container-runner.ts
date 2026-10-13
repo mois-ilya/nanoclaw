@@ -137,6 +137,8 @@ interface ActiveSessionRuntime {
    * it unset would exempt every adopted session from the ceiling.
    */
   startedAtMs: number;
+  /** When the container.json it runs with was materialized (before `startedAtMs`). */
+  configAtMs: number;
   /** True when this runtime was adopted at startup rather than spawned here. */
   adopted: boolean;
   exitCallbacks: Array<() => void>;
@@ -241,6 +243,18 @@ export function isContainerRunning(sessionId: string): boolean {
 
 export function getContainerStartedAtMs(sessionId: string): number | undefined {
   return activeContainers.get(sessionId)?.startedAtMs;
+}
+
+/**
+ * When the running container's `container.json` was materialized, for "does it hold an older config than the
+ * change mark" checks. A spawned runtime knows its own start; an adopted one was started by a previous host
+ * process and the driver exposes no real start time, so it counts as older than any mark (0): the worst case is
+ * one needless restart of an idle container, never a stale config that stays.
+ */
+export function getContainerConfigStartedAtMs(sessionId: string): number | undefined {
+  const runtime = activeContainers.get(sessionId);
+  if (!runtime) return undefined;
+  return runtime.adopted ? 0 : runtime.configAtMs;
 }
 
 /** Stop host-local observation without revoking resources that may survive restart. */
@@ -427,6 +441,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
+  const configAtMs = Date.now(); // taken before the file is written: a change during the spawn must look newer
   const containerConfig = await materializeContainerJson(agentGroup.id);
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
@@ -512,7 +527,7 @@ async function spawnContainer(session: Session): Promise<void> {
     await releaseGatewaySession(gatewaySession, { kind: 'session-ended', reason: 'driver-prepare-failed' });
     throw err;
   }
-  const runtime = registerRuntime(session.id, handle, gatewaySession, containerName, false);
+  const runtime = registerRuntime(session.id, handle, gatewaySession, containerName, false, configAtMs);
   runtime.claimIncarnation = claimIncarnation;
 
   await armSessionLifecycle({
@@ -584,6 +599,7 @@ function registerRuntime(
   gateway: GatewaySessionControl,
   containerName: string,
   adopted: boolean,
+  configAtMs?: number,
 ): ActiveSessionRuntime {
   let resolveFinished!: () => void;
   const finishedPromise = new Promise<void>((resolve) => {
@@ -594,6 +610,7 @@ function registerRuntime(
     gateway,
     containerName,
     startedAtMs: Date.now(),
+    configAtMs: configAtMs ?? Date.now(),
     adopted,
     exitCallbacks: [],
     finished: false,

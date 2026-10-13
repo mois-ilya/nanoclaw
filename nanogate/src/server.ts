@@ -6,10 +6,12 @@ import type { AddressInfo } from 'node:net';
 import { createAdminServer } from './admin-api.js';
 import { handleAnthropic, sendError } from './anthropic-proxy.js';
 import { sweepOpenReservations } from './budget.js';
+import { McpApprovals } from './mcp-approvals.js';
+import { createMcpServer } from './mcp-proxy.js';
 import { buildDenySets, createConnectServer, flushEgress } from './connect-proxy.js';
 import { type Config, readApiKey } from './config.js';
 import type { Ctx, Resolver } from './context.js';
-import { openDb } from './db.js';
+import { openDb, pruneMcpCalls, reapMcpCalls } from './db.js';
 import { LiveRegistry } from './live.js';
 import { loadEncryptionKey } from './tokens.js';
 
@@ -19,18 +21,21 @@ export interface NanogateOptions {
   resolver?: Resolver;
   /** Test seam: period of the egress flush + open-reservation sweep (default 60 s). */
   sweepIntervalMs?: number;
+  /** Test seam: extra CA certificate(s) trusted by the HTTPS client that talks to MCP upstreams. */
+  mcpUpstreamCa?: string | Buffer;
 }
 
 export interface Nanogate {
   ctx: Ctx;
-  ports: { anthropic: number; connect: number; host: number };
+  ports: { anthropic: number; connect: number; host: number; mcp: number };
   adminSocket: string;
   /** Re-read key files, prices and deny sets from a new config (SIGHUP). Listeners are unchanged. */
   reload(config: Config): void;
   close(): Promise<void>;
 }
 
-const defaultLog = (o: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ t: new Date().toISOString(), ...o })}\n`);
+const defaultLog = (o: Record<string, unknown>) =>
+  process.stdout.write(`${JSON.stringify({ t: new Date().toISOString(), ...o })}\n`);
 /**
  * c-ares (dns.promises.Resolver), not dns.lookup: lookup runs on libuv's 4-thread pool, where a few hanging
  * names would starve every other tenant. c-ares uses no pool threads, so the per-tenant / global limits in
@@ -72,12 +77,29 @@ export async function startNanogate(config: Config, opts: NanogateOptions = {}):
   const db = openDb(config.stateDir);
   const deny = buildDenySets(config);
   const ctx: Ctx = {
-    db, config, apiKey: readApiKey(config.anthropicKeyFile), encKey: loadEncryptionKey(config.encryptionKeyFile),
-    live: new LiveRegistry(), log: opts.log ?? defaultLog, resolve: opts.resolver ?? makeDefaultResolver(config.connectLimits.dnsTimeoutMs),
-    ...deny, inflight: new Map(), activeReservations: new Set(), bodyBytes: 0, tenantBodyBytes: new Map(), dns: { global: 0, perTenant: new Map(), queues: new Map(), queued: 0 }, warnedBetas: new Set(), egress: new Map(),
+    db,
+    config,
+    apiKey: readApiKey(config.anthropicKeyFile),
+    encKey: loadEncryptionKey(config.encryptionKeyFile),
+    live: new LiveRegistry(),
+    log: opts.log ?? defaultLog,
+    resolve: opts.resolver ?? makeDefaultResolver(config.connectLimits.dnsTimeoutMs),
+    ...deny,
+    inflight: new Map(),
+    activeReservations: new Set(),
+    bodyBytes: 0,
+    tenantBodyBytes: new Map(),
+    dns: { global: 0, perTenant: new Map(), queues: new Map(), queued: 0 },
+    warnedBetas: new Set(),
+    egress: new Map(),
+    mcpSessions: new Map(),
+    mcpApprovals: new McpApprovals(),
+    ...(opts.mcpUpstreamCa ? { mcpUpstreamCa: opts.mcpUpstreamCa } : {}),
   };
   const swept = sweepOpenReservations(db, config.prices);
   if (swept) ctx.log({ msg: 'swept_open_reservations', count: swept });
+  const reaped = reapMcpCalls(db);
+  if (reaped) ctx.log({ msg: 'reaped_mcp_calls', count: reaped });
 
   const mkAnthropic = (kind: 'session' | 'host', health: boolean) =>
     http.createServer((req, res) => {
@@ -94,6 +116,7 @@ export async function startNanogate(config: Config, opts: NanogateOptions = {}):
   const anth = mkAnthropic('session', true);
   const host = mkAnthropic('host', false);
   const connect = createConnectServer(ctx);
+  const mcp = createMcpServer(ctx);
   const admin = createAdminServer(ctx);
   // Streams can run long; do not let node's default request timeout cut them.
   for (const s of [anth, host]) {
@@ -104,10 +127,17 @@ export async function startNanogate(config: Config, opts: NanogateOptions = {}):
     s.maxConnections = config.anthropicLimits.maxConnections;
   }
 
+  // A held tools/call keeps its request open for up to mcp.holdMs: no request timeout, a long idle backstop.
+  mcp.requestTimeout = 0;
+  mcp.headersTimeout = 30_000;
+  mcp.timeout = config.mcp.socketIdleMs;
+  mcp.maxConnections = 256;
+
   const ports = {
     anthropic: await listen(anth, config.listen.anthropicPort, config.listen.bind),
     connect: await listen(connect, config.listen.connectPort, config.listen.bind),
     host: await listen(host, config.listen.hostPort, config.listen.hostBind),
+    mcp: await listen(mcp, config.listen.mcpPort, config.listen.bind),
   };
 
   const sock = config.listen.adminSocket;
@@ -137,12 +167,19 @@ export async function startNanogate(config: Config, opts: NanogateOptions = {}):
     } catch (e) {
       ctx.log({ msg: 'sweep_error', error: (e as Error).message });
     }
+    try {
+      pruneMcpCalls(db, Date.now(), ctx.config.mcp.callsRetentionDays);
+    } catch (e) {
+      ctx.log({ msg: 'mcp_prune_error', error: (e as Error).message });
+    }
   }, sweepIntervalMs);
   timer.unref();
 
   ctx.log({ msg: 'started', ports, admin: sock });
   return {
-    ctx, ports, adminSocket: sock,
+    ctx,
+    ports,
+    adminSocket: sock,
     reload(next) {
       const nd = buildDenySets(next);
       ctx.apiKey = readApiKey(next.anthropicKeyFile);
@@ -154,8 +191,9 @@ export async function startNanogate(config: Config, opts: NanogateOptions = {}):
     },
     async close() {
       clearInterval(timer);
-      for (const s of [anth, host, connect, admin]) s.closeAllConnections?.();
-      await Promise.all([anth, host, connect, admin].map((s) => new Promise<void>((r) => s.close(() => r()))));
+      ctx.mcpApprovals.closeAll();
+      for (const s of [anth, host, connect, mcp, admin]) s.closeAllConnections?.();
+      await Promise.all([anth, host, connect, mcp, admin].map((s) => new Promise<void>((r) => s.close(() => r()))));
       flushEgress(ctx);
       db.close();
       fs.rmSync(sock, { force: true });

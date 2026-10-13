@@ -65,6 +65,8 @@ export interface McpHttpServerConfig {
   type: 'http';
   url: string;
   headers?: Record<string, string>;
+  /** Per-server tool-call timeout in ms (integer 1000..3600000), passed through to the agent's MCP client. */
+  timeout?: number;
   /** See McpStdioServerConfig.plugin — same ownership marker. */
   plugin?: string;
   instructions?: string;
@@ -167,16 +169,19 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
       }
     }
     const headers = parseStringRecord(input.headers, 'headers');
+    const timeout = parseTimeout(input.timeout);
     return {
       type: 'http',
       url,
       ...(headers === undefined ? {} : { headers }),
+      ...(timeout === undefined ? {} : { timeout }),
       ...(instructions === undefined ? {} : { instructions }),
     };
   }
   if (command === undefined) throw new Error('Provide exactly one of command or url');
 
   if (input.headers !== undefined) throw new Error('headers is only valid with url');
+  if (input.timeout !== undefined) throw new Error('timeout is only valid with url');
   const args = input.args ?? [];
   if (!Array.isArray(args) || !args.every((arg) => typeof arg === 'string')) {
     throw new Error('args must be a JSON array of strings');
@@ -195,6 +200,14 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
     ...(cwd === undefined ? {} : { cwd }),
     ...(instructions === undefined ? {} : { instructions }),
   };
+}
+
+function parseTimeout(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1000 || value > 3_600_000) {
+    throw new Error('timeout must be an integer number of milliseconds between 1000 and 3600000');
+  }
+  return value;
 }
 
 function parseStringRecord(value: unknown, flag: string): Record<string, string> | undefined {
@@ -268,6 +281,37 @@ export type DisabledToolsProvider = (agentGroupId: string) => Promise<readonly s
 let disabledToolsProvider: DisabledToolsProvider | null = null;
 export function setDisabledToolsProvider(fn: DisabledToolsProvider | null): void {
   disabledToolsProvider = fn;
+}
+
+/**
+ * Product hook: MCP servers the host manages itself (gateway connectors). They are NOT stored in
+ * `mcp_servers` and are merged into container.json AFTER `sanitizeStoredMcpServers`, so the URL validation
+ * on stored/self-mod servers stays as strict as before (an in-network `http://nanorelay:…` is not accepted there).
+ */
+export type ManagedMcpServersProvider = (agentGroupId: string) => Promise<Record<string, McpHttpServerConfig>>;
+let managedMcpServersProvider: ManagedMcpServersProvider | null = null;
+export function setManagedMcpServersProvider(fn: ManagedMcpServersProvider | null): void {
+  managedMcpServersProvider = fn;
+}
+
+/** Product hook: the effective container.json of a group changed (running containers hold the old one). */
+export type ConfigChangedListener = (agentGroupId: string, reason: string) => void | Promise<void>;
+let configChangedListener: ConfigChangedListener | null = null;
+export function setConfigChangedListener(fn: ConfigChangedListener | null): void {
+  configChangedListener = fn;
+}
+
+/** Tell the product layer a group's config changed. Never throws: the caller's write already succeeded. */
+export function notifyConfigChanged(agentGroupId: string, reason: string): void {
+  if (!configChangedListener) return;
+  try {
+    void Promise.resolve(configChangedListener(agentGroupId, reason)).catch((err) =>
+      log.warn('Config-changed listener failed', { group: agentGroupId, reason, err }),
+    );
+    // eslint-disable-next-line no-catch-all/no-catch-all -- a synchronous listener throw must not fail the write
+  } catch (err) {
+    log.warn('Config-changed listener failed', { group: agentGroupId, reason, err });
+  }
 }
 
 /**
@@ -428,6 +472,36 @@ function speedFields(speed: ContainerSpeed | undefined): Pick<ContainerConfig, '
   return speed === 'fast' ? { fastMode: true, speed } : { speed };
 }
 
+/** Host-managed servers overlay the stored ones; a name clash is logged and the managed server wins. */
+async function mergeManagedMcpServers(config: ContainerConfig, agentGroupId: string, groupName: string): Promise<void> {
+  if (!managedMcpServersProvider) return;
+  let managed: Record<string, McpHttpServerConfig>;
+  try {
+    managed = await managedMcpServersProvider(agentGroupId);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- connectors are optional; the agent still starts without them
+  } catch (err) {
+    log.warn('Managed MCP servers unavailable; spawning without them', { group: groupName, err });
+    return;
+  }
+  for (const [name, server] of Object.entries(managed)) {
+    try {
+      validateMcpServerName(name);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- one bad managed entry must not drop the others
+    } catch (err) {
+      log.warn('Dropping invalid managed MCP server', {
+        group: groupName,
+        server: name,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(config.mcpServers, name)) {
+      log.warn('Managed MCP server overrides a stored one with the same name', { group: groupName, server: name });
+    }
+    config.mcpServers[name] = server;
+  }
+}
+
 /**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
@@ -441,6 +515,7 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  await mergeManagedMcpServers(config, agentGroupId, group.name);
   const disabled = await disabledNanoclawToolsFor(agentGroupId);
   if (disabled.length > 0) config.disabledNanoclawTools = disabled;
 

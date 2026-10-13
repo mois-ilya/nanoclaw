@@ -89,6 +89,78 @@ export interface NanogateSessionRow {
   runtimeIdentity: string | null;
 }
 
+/** Body of `PUT /mcp-connectors/:id` (nanogate keeps its own copy; the secret lives apart under `mcp.<id>`). */
+export interface McpConnectorUpsert {
+  tenantId: string;
+  title: string;
+  url: string;
+  secretName: string;
+  extraHeaders: Record<string, string>;
+  toolPolicy: Record<string, 'ask' | 'auto'>;
+  enabled: boolean;
+}
+
+export interface McpConnectorTool {
+  name: string;
+  readOnly: boolean;
+  title?: string | null;
+}
+
+export interface McpConnectorState {
+  id: string;
+  tenantId: string;
+  enabled: boolean;
+  tools: McpConnectorTool[];
+  toolsSeenAt: number | null;
+}
+
+export type McpProbeResult =
+  | { ok: true; tools: number }
+  | { ok: false; error: 'no_key' | 'key_rejected' | 'upstream_unreachable' | 'upstream_error'; status?: number };
+
+export type McpCallDecision =
+  | 'auto'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'unavailable'
+  | 'disconnected'
+  | 'revoked'
+  | 'disabled'
+  | 'pending';
+
+export interface McpCallRow {
+  id: string;
+  connectorId: string;
+  tool: string;
+  dangerous: boolean;
+  decision: McpCallDecision;
+  status: 'ok' | 'tool_error' | 'upstream_error' | 'unknown' | null;
+  startedAt: number;
+  finishedAt: number | null;
+}
+
+/** A dangerous `tools/call` that nanogate is holding for a human decision. */
+export interface McpPending {
+  id: string;
+  tenantId: string;
+  /** Runtime identity 'slug/group/session'. */
+  sessionKey: string;
+  connectorId: string;
+  connectorTitle: string;
+  tool: string;
+  args: Array<{ label: string; type: 'text' | 'long_text'; value: string }>;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface McpApprovalsReply {
+  version: number;
+  pending: McpPending[];
+}
+
+export type McpApprovalDecision = 'approve' | 'deny' | 'unavailable';
+
 export interface NanogateAdmin {
   healthz(): Promise<boolean>;
   ensureSession(input: {
@@ -121,7 +193,25 @@ export interface NanogateAdmin {
   deleteConnector(tenantId: string): Promise<void>;
   /** TCP-connect probe of a connector SOCKS address from nanogate's own network (the host cannot resolve it). */
   probeConnector(socksAddr: string): Promise<boolean>;
+  putMcpConnector(id: string, body: McpConnectorUpsert): Promise<void>;
+  deleteMcpConnector(id: string): Promise<void>;
+  listMcpConnectors(tenantId?: string): Promise<McpConnectorState[]>;
+  /** With `candidateKey`: vet a new key in memory only; nothing is stored. */
+  probeMcpConnector(id: string, candidateKey?: string): Promise<McpProbeResult>;
+  mcpCalls(query: { tenantId: string; connectorId?: string; limit?: number }): Promise<McpCallRow[]>;
+  /** Long-poll: answers at once when nanogate's version is past `since`, else after `waitMs` (<= 30000). */
+  waitMcpApprovals(since: number, waitMs: number, signal?: AbortSignal): Promise<McpApprovalsReply>;
+  /** `accepted:false` means the call already finished (expired, disconnected, revoked). */
+  decideMcpApproval(id: string, decision: McpApprovalDecision): Promise<{ accepted: boolean }>;
 }
+
+interface RequestOpts {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** Long-poll slack on top of `waitMs`, so the poll ends by nanogate's answer rather than our deadline. */
+const LONG_POLL_SLACK_MS = 5_000;
 
 export function createNanogateAdmin(
   opts: { socketPath?: string; timeoutMs?: number } = {},
@@ -129,8 +219,14 @@ export function createNanogateAdmin(
   const socketPath = opts.socketPath ?? process.env.NANOGATE_ADMIN_SOCKET?.trim() ?? DEFAULT_ADMIN_SOCKET;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  function request(method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
+  function request(
+    method: string,
+    path: string,
+    body?: unknown,
+    ropts: RequestOpts = {},
+  ): Promise<{ status: number; json: unknown }> {
     return new Promise((resolve, reject) => {
+      if (ropts.signal?.aborted) return reject(new NanogateUnreachableError(path, new Error('aborted')));
       const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
       const req = http.request(
         {
@@ -160,15 +256,20 @@ export function createNanogateAdmin(
         },
       );
       // Total deadline, not idle: a hung admin socket must not stall session admission.
-      req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+      req.setTimeout(ropts.timeoutMs ?? timeoutMs, () => req.destroy(new Error('timeout')));
       req.on('error', (err) => reject(new NanogateUnreachableError(path, err)));
+      if (ropts.signal) {
+        const onAbort = () => req.destroy(new Error('aborted'));
+        ropts.signal.addEventListener('abort', onAbort, { once: true });
+        req.on('close', () => ropts.signal!.removeEventListener('abort', onAbort));
+      }
       if (payload) req.write(payload);
       req.end();
     });
   }
 
-  async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const { status, json } = await request(method, path, body);
+  async function call<T>(method: string, path: string, body?: unknown, ropts?: RequestOpts): Promise<T> {
+    const { status, json } = await request(method, path, body, ropts);
     if (status >= 200 && status < 300) return json as T;
     const code =
       typeof (json as { error?: unknown })?.error === 'string' ? (json as { error: string }).error : `http_${status}`;
@@ -245,5 +346,32 @@ export function createNanogateAdmin(
       const r = await call<{ up?: boolean }>('POST', '/connectors/probe', { socksAddr });
       return r.up === true;
     },
+    async putMcpConnector(id, body) {
+      await call('PUT', `/mcp-connectors/${seg(id)}`, body);
+    },
+    async deleteMcpConnector(id) {
+      await call('DELETE', `/mcp-connectors/${seg(id)}`);
+    },
+    async listMcpConnectors(tenantId) {
+      const q = tenantId === undefined ? '' : `?tenantId=${seg(tenantId)}`;
+      return (await call<{ connectors?: McpConnectorState[] }>('GET', `/mcp-connectors${q}`)).connectors ?? [];
+    },
+    // Probe talks to the upstream (up to 5 list pages), so it gets more than the default 5 s.
+    probeMcpConnector: (id, candidateKey) =>
+      call('POST', `/mcp-connectors/${seg(id)}/probe`, candidateKey === undefined ? undefined : { candidateKey }, {
+        timeoutMs: 45_000,
+      }),
+    async mcpCalls(query) {
+      const q = new URLSearchParams({ tenantId: query.tenantId });
+      if (query.connectorId !== undefined) q.set('connectorId', query.connectorId);
+      if (query.limit !== undefined) q.set('limit', String(query.limit));
+      return (await call<{ calls?: McpCallRow[] }>('GET', `/mcp-calls?${q.toString()}`)).calls ?? [];
+    },
+    waitMcpApprovals: (since, waitMs, signal) =>
+      call('GET', `/mcp-approvals?since=${since}&waitMs=${waitMs}`, undefined, {
+        timeoutMs: waitMs + LONG_POLL_SLACK_MS,
+        signal,
+      }),
+    decideMcpApproval: (id, decision) => call('POST', `/mcp-approvals/${seg(id)}/decision`, { decision }),
   };
 }
